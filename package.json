@@ -1,0 +1,20 @@
+{
+    "name": "hyperswap-v3",
+    "version": "1.0.0",
+    "description": "Template for Hyperswap V3 DEX interactions",
+    "main": "index.js",
+    "scripts": {
+      "start": "node index.js",
+      "test": "echo \"No test specified\" && exit 0"
+    },
+    "dependencies": {
+      "dotenv": "^16.0.3",
+      "@ethersproject/abi": "^5.7.0",
+      "@ethersproject/contracts": "^5.7.0",
+      "ethers": "^5.7.0"
+    },
+    "keywords": ["dex", "v3", "hyperswap", "blockchain"],
+    "author": "",
+    "license": "ISC"
+  }
+  

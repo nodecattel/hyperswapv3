@@ -1,6 +1,6 @@
 require("dotenv").config();
 const { ethers } = require("ethers");
-const routerABI = require("./abi/router_v3.json");
+const routerABI = require("./abi/SwapRouter.json");
 
 // Router Contract Address
 const ROUTER_ADDRESS = process.env.ROUTER_V3_ADDRESS;

@@ -1,17 +1,77 @@
-# Logs
-logs
+# ============================================================================
+# HyperSwap V3 Trading Bot - .gitignore
+# ============================================================================
+# CRITICAL: This file prevents sensitive trading data from being committed
+# Never commit private keys, API secrets, or production environment files!
+
+# ============================================================================
+# SENSITIVE DATA - NEVER COMMIT THESE!
+# ============================================================================
+
+# Environment Files (CRITICAL - Contains private keys and API secrets)
+.env
+.env.local
+.env.production
+.env.development
+.env.test
+.env.staging
+.env.*.local
+.env.backup.*
+env.json
+environment.json
+
+# Private Keys and Wallet Files (CRITICAL SECURITY)
+*.key
+*.pem
+*.p12
+*.pfx
+wallet.json
+wallets/
+keystore/
+keys/
+private/
+secrets/
+.secrets/
+mnemonic.txt
+seed.txt
+
+# API Keys and Configuration Secrets
+config/secrets.json
+config/production.json
+config/local.json
+api-keys.json
+credentials.json
+auth.json
+
+# Trading Bot Specific Sensitive Data
+trading-config.json
+production-config.json
+live-config.json
+bot-secrets.json
+
+# ============================================================================
+# LOGS AND RUNTIME DATA
+# ============================================================================
+
+# Log Files
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
 .pnpm-debug.log*
+debug.log
+error.log
+access.log
+trading.log
+bot.log
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # Runtime data
-pids
+pids/
 *.pid
 *.seed
 *.pid.lock
@@ -20,92 +80,180 @@ pids
 lib-cov
 
 # Coverage directory used by tools like istanbul
-coverage
+coverage/
 *.lcov
 
 # nyc test coverage
-.nyc_output
+.nyc_output/
 
-# Grunt intermediate storage (https://gruntjs.com/creating-plugins#storing-task-files)
-.grunt
-
-# Bower dependency directory (https://bower.io/)
-bower_components
-
-# node-waf configuration
-.lock-wscript
-
-# Compiled binary addons (https://nodejs.org/api/addons.html)
-build/Release
+# ============================================================================
+# NODE.JS AND PACKAGE MANAGERS
+# ============================================================================
 
 # Dependency directories
 node_modules/
 jspm_packages/
+bower_components/
 
-# Snowpack dependency directory (https://snowpack.dev/)
-web_modules/
-
-# TypeScript cache
-*.tsbuildinfo
-
-# Optional npm cache directory
-.npm
-
-# Optional eslint cache
-.eslintcache
-
-# Optional stylelint cache
-.stylelintcache
-
-# Microbundle cache
-.rpt2_cache/
-.rts2_cache_cjs/
-.rts2_cache_es/
-.rts2_cache_umd/
-
-# Optional REPL history
-.node_repl_history
-
-# Output of 'npm pack'
-*.tgz
+# Package manager lock files (optional - some teams commit these)
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+.pnpm-debug.log*
 
 # Yarn Integrity file
 .yarn-integrity
 
-# dotenv environment variable files
-.env
-.env.development.local
-.env.test.local
-.env.production.local
-.env.local
+# yarn v2
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+.pnp.*
 
-# parcel-bundler cache (https://parceljs.org/)
-.cache
-.parcel-cache
+# npm
+.npm
+npm-debug.log*
+.npmrc
 
-# Next.js build output
-.next
-out
+# Output of 'npm pack'
+*.tgz
 
-# Nuxt.js build / generate output
-.nuxt
-dist
+# Snowpack dependency directory (https://snowpack.dev/)
+web_modules/
 
-# Gatsby files
+# ============================================================================
+# BUILD OUTPUTS AND CACHE
+# ============================================================================
+
+# Build directories
+build/
+dist/
+out/
+.next/
+.nuxt/
+.vuepress/dist/
+.docusaurus/
+
+# Compiled binary addons (https://nodejs.org/api/addons.html)
+build/Release
+
+# Cache directories
 .cache/
-# Comment in the public line in if your project uses Gatsby and not Next.js
-# https://nextjs.org/blog/next-9-1#public-directory-support
-# public
+.parcel-cache/
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+.temp/
+.tmp/
 
-# vuepress build output
-.vuepress/dist
+# TypeScript cache
+*.tsbuildinfo
 
-# vuepress v2.x temp and cache directory
-.temp
-.cache
+# Optional caches
+.eslintcache
+.stylelintcache
 
-# Docusaurus cache and generated files
-.docusaurus
+# Grunt intermediate storage (https://gruntjs.com/creating-plugins#storing-task-files)
+.grunt
+
+# node-waf configuration
+.lock-wscript
+
+# Optional REPL history
+.node_repl_history
+
+# ============================================================================
+# IDE AND EDITOR FILES
+# ============================================================================
+
+# Visual Studio Code
+.vscode/
+.vscode-test/
+*.code-workspace
+
+# IntelliJ IDEA / WebStorm / PyCharm
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# ============================================================================
+# OPERATING SYSTEM FILES
+# ============================================================================
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ============================================================================
+# TESTING AND DEVELOPMENT
+# ============================================================================
+
+# Test outputs
+test-results/
+playwright-report/
+test-report/
+coverage/
+.nyc_output/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
 
 # Serverless directories
 .serverless/
@@ -119,12 +267,44 @@ dist
 # TernJS port file
 .tern-port
 
-# Stores VSCode versions used for testing VSCode extensions
-.vscode-test
+# ============================================================================
+# TRADING BOT SPECIFIC FILES
+# ============================================================================
 
-# yarn v2
-.yarn/cache
-.yarn/unplugged
-.yarn/build-state.yml
-.yarn/install-state.gz
-.pnp.*
+# Trading data and backups
+backups/
+data/
+trading-data/
+historical-data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Performance and monitoring
+performance/
+monitoring/
+metrics/
+
+# Deployment and infrastructure
+deployment/
+infrastructure/
+terraform.tfstate*
+.terraform/
+
+# ============================================================================
+# SECURITY SCAN EXCLUSIONS
+# ============================================================================
+
+# Security scan results
+security-scan-results/
+vulnerability-reports/
+audit-results/
+
+# ============================================================================
+# CUSTOM PROJECT EXCLUSIONS
+# ============================================================================
+
+# Add any project-specific files that should not be committed
+# Example:
+# custom-config.json
+# local-overrides.js

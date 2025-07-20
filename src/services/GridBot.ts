@@ -1009,11 +1009,55 @@ export default class GridBot extends EventEmitter {
       checkInterval: this.ENHANCED_CONFIG.checkInterval
     });
 
-    // Update data store
+    // Update data store with initial status and start real-time updates
     await this.updateEnhancedDataStore();
+    this.startRealTimeDataSync();
   }
 
 
+
+  /**
+   * Start real-time data synchronization for status display
+   */
+  private startRealTimeDataSync(): void {
+    // Update data store every 2 seconds for real-time status display
+    const syncInterval = setInterval(async () => {
+      if (!this.isRunning) {
+        clearInterval(syncInterval);
+        return;
+      }
+
+      try {
+        // Get fresh price data
+        const priceResult = await this.pricingService.getCurrentPrice();
+        const currentPrice = priceResult ? (typeof priceResult === 'number' ? priceResult : priceResult.price) : null;
+
+        if (currentPrice && currentPrice !== this.lastPrice) {
+          this.lastPrice = currentPrice;
+
+          // Update price service data immediately
+          await this.dataStore.updatePriceServiceData({
+            currentPrice: this.lastPrice,
+            priceHistory: this.priceHistory.slice(-10),
+            volatility: this.currentVolatility,
+            priceDirection: this.priceDirection,
+            lastUpdate: Date.now()
+          });
+        }
+
+        // Update adaptive configuration if it changed
+        const adaptiveConfig = await this.getAdaptiveGridConfig();
+        await this.dataStore.updateAdaptiveConfig(adaptiveConfig);
+
+        // Update grid analysis
+        const gridAnalysis = await this.getGridAnalysis();
+        await this.dataStore.updateGridAnalysis(gridAnalysis);
+
+      } catch (error) {
+        this.logger.debug('Real-time sync error:', error);
+      }
+    }, 2000); // 2 second intervals for real-time updates
+  }
 
   /**
    * Enhanced monitoring loop with market intelligence
@@ -1040,6 +1084,9 @@ export default class GridBot extends EventEmitter {
 
         // Update performance metrics
         await this.updatePerformanceMetrics();
+
+        // Update data store with latest status (every monitoring cycle)
+        await this.updateEnhancedDataStore();
 
         // Log enhanced status
         this.logEnhancedStatus();
@@ -1138,13 +1185,14 @@ export default class GridBot extends EventEmitter {
   }
 
   /**
-   * Update enhanced data store with comprehensive status
+   * Update enhanced data store with comprehensive status and runtime configuration
    */
   private async updateEnhancedDataStore(): Promise<void> {
     try {
       const runtime = this.startTime ? Date.now() - this.startTime : 0;
       const netProfit = this.totalProfit - this.totalFees;
       const successRate = this.totalTrades > 0 ? 100 : 0; // Simplified for now
+      const adaptiveConfig = await this.getAdaptiveGridConfig();
 
       const status = {
         isRunning: this.isRunning,
@@ -1163,7 +1211,6 @@ export default class GridBot extends EventEmitter {
         // Enhanced metrics
         volatility: this.currentVolatility,
         priceDirection: this.priceDirection,
-        adaptiveConfig: await this.getAdaptiveGridConfig(),
 
         // Grid information
         gridInfo: {
@@ -1190,6 +1237,29 @@ export default class GridBot extends EventEmitter {
       };
 
       await this.dataStore.updateStatus(status);
+
+      // Update runtime configuration data
+      await this.dataStore.updateRuntimeConfig({
+        baseConfig: this.config.gridTrading,
+        enhancedConfig: this.ENHANCED_CONFIG,
+        multiPairMode: this.multiPairMode
+      });
+
+      // Update adaptive configuration
+      await this.dataStore.updateAdaptiveConfig(adaptiveConfig);
+
+      // Update grid analysis
+      const gridAnalysis = await this.getGridAnalysis();
+      await this.dataStore.updateGridAnalysis(gridAnalysis);
+
+      // Update price service data
+      await this.dataStore.updatePriceServiceData({
+        currentPrice: this.lastPrice,
+        priceHistory: this.priceHistory.slice(-10), // Last 10 prices
+        volatility: this.currentVolatility,
+        priceDirection: this.priceDirection
+      });
+
     } catch (error) {
       this.logger.error('Failed to update enhanced data store:', error);
     }
@@ -1406,8 +1476,9 @@ export default class GridBot extends EventEmitter {
       totalGrids: Array.from(this.pairGrids.values()).reduce((sum, grids) => sum + grids.length, 0)
     });
 
-    // Update data store with multi-pair metrics
+    // Update data store with multi-pair metrics and start real-time updates
     await this.updateMultiPairDataStore();
+    this.startRealTimeDataSync();
   }
 
   /**

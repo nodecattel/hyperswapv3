@@ -151,7 +151,7 @@ export default class GridBot extends EventEmitter {
 
     // Initialize services
     const webSocketService = new HyperLiquidWebSocketService();
-    this.pricingService = new HybridPricingService(onChainPriceService, webSocketService);
+    this.pricingService = new HybridPricingService(onChainPriceService, webSocketService, config);
     this.dataStore = DataStore.getInstance();
 
     // Setup logger
@@ -1582,8 +1582,8 @@ export default class GridBot extends EventEmitter {
     const baseToken = tokens[0]!;
     const quoteToken = tokens[1]!;
 
-    // Get pair-specific price
-    const priceResult = await this.pricingService.getCurrentPairPrice(baseToken, quoteToken);
+    // Get pair-specific price (force fresh for active trading)
+    const priceResult = await this.pricingService.getCurrentPairPrice(baseToken, quoteToken, true);
     const currentPrice = priceResult ? (typeof priceResult === 'number' ? priceResult : priceResult.price) : null;
 
     if (currentPrice) {
@@ -1743,8 +1743,8 @@ export default class GridBot extends EventEmitter {
     const baseToken = tokens[0]!;
     const quoteToken = tokens[1]!;
 
-    // Update price for this specific pair
-    const priceResult = await this.pricingService.getCurrentPairPrice(baseToken, quoteToken);
+    // Update price for this specific pair (force fresh for active trading)
+    const priceResult = await this.pricingService.getCurrentPairPrice(baseToken, quoteToken, true);
     const currentPrice = priceResult ? (typeof priceResult === 'number' ? priceResult : priceResult.price) : null;
 
     if (currentPrice) {
@@ -1853,14 +1853,14 @@ export default class GridBot extends EventEmitter {
   }
 
   /**
-   * Get token addresses for trading
+   * Get token addresses for trading from configuration
    */
   private getTokenAddresses(): { WHYPE: string; UBTC: string; HYPE: string; USDT0: string } {
     return {
-      WHYPE: '0x5555555555555555555555555555555555555555',
-      UBTC: '0x9fdbda0a5e284c32744d2f17ee5c74b284993463',
-      HYPE: '0x0000000000000000000000000000000000000000',
-      USDT0: '0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb'
+      WHYPE: this.config.tokens['WHYPE']?.address || '0x5555555555555555555555555555555555555555',
+      UBTC: this.config.tokens['UBTC']?.address || '0x9fdbda0a5e284c32744d2f17ee5c74b284993463',
+      HYPE: this.config.tokens['HYPE']?.address || '0x0000000000000000000000000000000000000000',
+      USDT0: this.config.tokens['USDT0']?.address || '0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb'
     };
   }
 }

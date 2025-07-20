@@ -2,6 +2,7 @@ import { ethers, BigNumber } from 'ethers';
 import * as winston from 'winston';
 import { PriceQuote, TradingError } from '../types';
 import GridTradingConfig from '../config/gridTradingConfig';
+// import { TOKENS, POOLS, getTokenBySymbol, getPoolByPair } from '../config/constants'; // TODO: Use constants in future updates
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -82,6 +83,7 @@ interface PoolConfig {
  */
 class OnChainPriceService {
   // Configuration stored for future use
+  private config: GridTradingConfig;
   private provider: ethers.providers.JsonRpcProvider;
   private logger: winston.Logger;
   private addresses: ContractAddresses;
@@ -100,6 +102,7 @@ class OnChainPriceService {
   private poolConfigs: Map<string, PoolConfig> = new Map();
 
   constructor(config: GridTradingConfig, provider: ethers.providers.JsonRpcProvider) {
+    this.config = config;
     this.provider = provider;
 
     // Initialize logger
@@ -204,22 +207,22 @@ class OnChainPriceService {
    * Initialize pool configurations for all known trading pairs
    */
   private initializePoolConfigs(): void {
-    // HYPE/USDT0 pools (verified HyperSwap V3 pools)
-    this.poolConfigs.set('HYPE_USDT0_0.05%', {
+    // WHYPE/USDT0 pools (DEX trading requires wrapped tokens)
+    this.poolConfigs.set('WHYPE_USDT0_0.05%', {
       address: '0x337b56d87a6185cd46af3ac2cdf03cbc37070c30',
       fee: 500 // 0.05% - TVL 6.73M$, daily volume 22.95M$ (recommended)
     });
-    this.poolConfigs.set('HYPE_USDT0_0.3%', {
+    this.poolConfigs.set('WHYPE_USDT0_0.3%', {
       address: '0x56abfaf40f5b7464e9cc8cff1af13863d6914508',
       fee: 3000 // 0.3% - TVL 10.08M$, daily volume 4.9M$
     });
 
-    // HYPE/UBTC pools
-    this.poolConfigs.set('HYPE_UBTC_0.3%', {
+    // WHYPE/UBTC pools (DEX trading requires wrapped tokens)
+    this.poolConfigs.set('WHYPE_UBTC_0.3%', {
       address: '0x3a36b04bcc1d5e2e303981ef643d2668e00b43e7',
       fee: 3000 // 0.3% - TVL 7.84M$, daily volume 2.8M$ (recommended)
     });
-    this.poolConfigs.set('HYPE_UBTC_0.05%', {
+    this.poolConfigs.set('WHYPE_UBTC_0.05%', {
       address: '0xbbcf8523811060e1c112a8459284a48a4b17661f',
       fee: 500 // 0.05% - TVL 66K$, daily volume 112K$
     });
@@ -287,26 +290,21 @@ class OnChainPriceService {
     tokenIn: string,
     tokenOut: string,
     amountIn: BigNumber,
-    fee: number
+    fee: number,
+    forceFresh: boolean = false
   ): Promise<PriceQuote | null> {
     try {
       if (!this.quoterV2Contract) {
         throw new TradingError('QuoterV2 contract not initialized');
       }
 
-      // Handle native HYPE (ETH-like behavior)
+      // Handle native HYPE (ETH-like behavior) - use WHYPE for actual pricing
       if (tokenIn === ethers.constants.AddressZero || tokenIn === '0x0000000000000000000000000000000000000000') {
-        this.logger.info('Using native HYPE for pricing calculation');
+        this.logger.info('Converting native HYPE to WHYPE for pricing calculation');
 
-        // For native HYPE, we can use real pool data or reasonable estimates
-        // HYPE ~$47.2, BTC ~$118,000: 47.2/118000 ≈ 0.0004
-        const mockAmountOut = amountIn.mul(40000).div(ethers.utils.parseUnits('1', 18));
-
-        return {
-          amountOut: mockAmountOut,
-          source: 'NATIVE_HYPE_ESTIMATE',
-          gasEstimate: BigNumber.from('100000')
-        };
+        // Use WHYPE address for actual QuoterV2 call (HYPE = WHYPE 1:1)
+        const whypeAddress = this.tokenAddresses['WHYPE']?.address || '0x5555555555555555555555555555555555555555';
+        return await this.getBestQuote(whypeAddress, tokenOut, amountIn, fee);
       }
 
       // ✅ WHYPE is deployed at 0x5555555555555555555555555555555555555555
@@ -321,11 +319,11 @@ class OnChainPriceService {
         throw new TradingError('Invalid token addresses provided');
       }
 
-      // Check cache first
+      // Check cache first (unless forceFresh is requested)
       const cacheKey = `${tokenIn}-${tokenOut}-${amountIn.toString()}-${fee}`;
       const cached = this.priceCache.get(cacheKey);
 
-      if (cached && Date.now() - cached.timestamp < this.cacheExpiryMs) {
+      if (!forceFresh && cached && Date.now() - cached.timestamp < this.cacheExpiryMs) {
         // Use raw BigNumber from cache if available, otherwise convert decimal price
         const cachedAmountOut = (cached as any).rawAmountOut ||
           ethers.utils.parseUnits(cached.price.price.toString(), 8); // UBTC has 8 decimals
@@ -395,10 +393,27 @@ class OnChainPriceService {
 
   /**
    * Get current price for a specific trading pair using token symbols
+   * Supports WHYPE-based trading pairs for DEX consistency
    */
-  public async getPairPrice(baseToken: string, quoteToken: string): Promise<number | null> {
+  public async getPairPrice(baseToken: string, quoteToken: string, forceFresh: boolean = false): Promise<number | null> {
     try {
-      // Get token addresses and decimals
+      // Handle WHYPE/USDT0 pair specifically (standardized for DEX trading)
+      if (baseToken === 'WHYPE' && quoteToken === 'USDT0') {
+        return await this.getWhypeUsdt0Price(forceFresh);
+      }
+
+      // Handle WHYPE/UBTC pair specifically
+      if (baseToken === 'WHYPE' && quoteToken === 'UBTC') {
+        return await this.getWhypeUbtcPrice();
+      }
+
+      // Legacy support for HYPE/USDT0 (redirect to WHYPE/USDT0)
+      if (baseToken === 'HYPE' && quoteToken === 'USDT0') {
+        this.logger.info('Redirecting HYPE/USDT0 request to WHYPE/USDT0 for DEX trading consistency');
+        return await this.getWhypeUsdt0Price();
+      }
+
+      // Get token addresses and decimals for other pairs
       const baseTokenInfo = this.tokenAddresses[baseToken];
       const quoteTokenInfo = this.tokenAddresses[quoteToken];
 
@@ -632,6 +647,72 @@ class OnChainPriceService {
   }
 
   /**
+   * Get WHYPE/USDT0 price from the most liquid pool (0.05% fee)
+   * Note: Uses WHYPE address for DEX trading consistency
+   */
+  private async getWhypeUsdt0Price(forceFresh: boolean = false): Promise<number | null> {
+    try {
+      const whypeAddress = this.tokenAddresses['WHYPE']?.address || '0x5555555555555555555555555555555555555555';
+      const usdt0Address = this.tokenAddresses['USDT0']?.address || '0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb';
+
+      // Use 1 WHYPE as standard amount
+      const oneWhype = ethers.utils.parseUnits('1.0', 18);
+
+      // Try 0.05% fee pool first (highest liquidity: TVL 6.73M$, volume 22.95M$)
+      let quote = await this.getBestQuote(whypeAddress, usdt0Address, oneWhype, 500, forceFresh);
+
+      if (!quote || quote.source.includes('MOCK')) {
+        // Fallback to 0.3% fee pool (TVL 10.08M$, volume 4.9M$)
+        quote = await this.getBestQuote(whypeAddress, usdt0Address, oneWhype, 3000, forceFresh);
+      }
+
+      if (!quote || quote.source.includes('MOCK')) {
+        this.logger.warn('No valid WHYPE/USDT0 quote available from on-chain sources');
+        return null;
+      }
+
+      // Convert USDT0 output (6 decimals) to price
+      const price = parseFloat(ethers.utils.formatUnits(quote.amountOut, 6));
+      this.logger.info(`WHYPE/USDT0 price: ${price.toFixed(4)} (source: ${quote.source})`);
+
+      return price;
+    } catch (error) {
+      this.logger.error('Failed to get WHYPE/USDT0 price:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Get WHYPE/UBTC price from the pool
+   */
+  private async getWhypeUbtcPrice(): Promise<number | null> {
+    try {
+      const whypeAddress = this.tokenAddresses['WHYPE']?.address || '0x5555555555555555555555555555555555555555';
+      const ubtcAddress = this.tokenAddresses['UBTC']?.address || '0x9fdbda0a5e284c32744d2f17ee5c74b284993463';
+
+      // Use 1 WHYPE as standard amount
+      const oneWhype = ethers.utils.parseUnits('1.0', 18);
+
+      // Try 0.3% fee pool (TVL 7.84M$, volume 2.8M$)
+      const quote = await this.getBestQuote(whypeAddress, ubtcAddress, oneWhype, 3000);
+
+      if (!quote || quote.source.includes('MOCK')) {
+        this.logger.warn('No valid WHYPE/UBTC quote available from on-chain sources');
+        return null;
+      }
+
+      // Convert UBTC output (8 decimals) to price
+      const price = parseFloat(ethers.utils.formatUnits(quote.amountOut, 8));
+      this.logger.info(`WHYPE/UBTC price: ${price.toFixed(8)} (source: ${quote.source})`);
+
+      return price;
+    } catch (error) {
+      this.logger.error('Failed to get WHYPE/UBTC price:', error);
+      return null;
+    }
+  }
+
+  /**
    * Get supported fee tiers
    */
   public getSupportedFeeTiers(): number[] {
@@ -650,6 +731,33 @@ class OnChainPriceService {
    */
   public parsePrice(price: string, decimals: number = 8): BigNumber {
     return ethers.utils.parseUnits(price, decimals);
+  }
+
+  /**
+   * Get USD price context for compatibility with existing code
+   * Returns HYPE/USD price from WHYPE/USDT0 (since WHYPE=HYPE 1:1 and USDT0≈USD)
+   */
+  public async getUsdPriceContext(): Promise<{ hypeUsd: number; btcUsd: number } | null> {
+    try {
+      // Get WHYPE/USDT0 price (WHYPE=HYPE 1:1, USDT0≈USD)
+      const whypeUsdt0Price = await this.getWhypeUsdt0Price();
+
+      if (!whypeUsdt0Price) {
+        return null;
+      }
+
+      // Use default BTC price from config or fallback
+      const defaultPrices = this.config?.defaultPrices || {};
+      const btcUsd = defaultPrices.btcUsd || 118000;
+
+      return {
+        hypeUsd: whypeUsdt0Price, // WHYPE = HYPE 1:1
+        btcUsd: btcUsd
+      };
+    } catch (error) {
+      this.logger.error('Failed to get USD price context:', error);
+      return null;
+    }
   }
 }
 

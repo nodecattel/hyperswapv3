@@ -155,11 +155,14 @@ class HyperSwapV3TradingService {
       console.log(`Sufficient TokenIn allowance already exists.`);
     }
 
-    // Prepare params - EXACT same structure as v3_swap_functions.js
+    // Get pool fee from configuration
+    const poolFee = this.config.gridTrading.poolFee || 3000; // Default to 3000 if not configured
+
+    // Prepare params - using configured pool fee
     const params = {
       tokenIn,
       tokenOut,
-      fee: 3000, // Hardcoded to 3000 like in v3_swap_functions.js
+      fee: poolFee, // Use configured pool fee
       recipient: recipientAddress,
       deadline,
       amountIn, // Pass BigNumber directly

@@ -13,8 +13,21 @@ import {
   LoggingConfig,
   SafetyConfig,
   DashboardConfig,
+  DefaultPricesConfig,
   ConfigurationError
 } from '../types';
+import {
+  NETWORKS,
+  TOKENS,
+  POOLS,
+  DEFAULT_PRICES,
+  TRADING_PARAMS,
+  API_ENDPOINTS,
+  LOGGING_CONFIG,
+  DASHBOARD_CONFIG,
+  getContractAddresses,
+  getNetworkByChainId
+} from './constants';
 
 // Load environment variables
 config();
@@ -38,6 +51,7 @@ class GridTradingConfig {
   public readonly logging: LoggingConfig;
   public readonly safety: SafetyConfig;
   public readonly dashboard: DashboardConfig;
+  public readonly defaultPrices: DefaultPricesConfig;
 
   // Token validation state (removed unused variables)
 
@@ -53,6 +67,7 @@ class GridTradingConfig {
     this.logging = this.loadLoggingConfig();
     this.safety = this.loadSafetyConfig();
     this.dashboard = this.loadDashboardConfig();
+    this.defaultPrices = this.loadDefaultPricesConfig();
 
     // Validate known tokens
     this.validateKnownTokens();
@@ -62,15 +77,18 @@ class GridTradingConfig {
    * Load network configuration
    */
   private loadNetworkConfig(): NetworkConfig {
+    const chainId = parseInt(process.env['CHAIN_ID'] || '999');
+    const networkFromConstants = getNetworkByChainId(chainId) || NETWORKS.HYPERLIQUID_MAINNET;
+
     return {
-      name: process.env['NETWORK_NAME'] || 'hyperliquid',
-      chainId: parseInt(process.env['CHAIN_ID'] || '999'),
-      rpcUrl: process.env['RPC_URL'] || 'https://rpc.hyperliquid.xyz/evm',
-      explorerUrl: process.env['EXPLORER_URL'] || 'https://hyperevmscan.io',
+      name: process.env['NETWORK_NAME'] || networkFromConstants.name,
+      chainId: chainId,
+      rpcUrl: process.env['RPC_URL'] || networkFromConstants.rpcUrl,
+      explorerUrl: process.env['EXPLORER_URL'] || networkFromConstants.explorerUrl,
       nativeCurrency: {
-        name: 'Hyperliquid',
-        symbol: 'HYPE',
-        decimals: 18
+        name: networkFromConstants.nativeCurrency.name,
+        symbol: networkFromConstants.nativeCurrency.symbol,
+        decimals: networkFromConstants.nativeCurrency.decimals
       }
     };
   }
@@ -102,105 +120,92 @@ class GridTradingConfig {
    * Load contract configuration
    */
   private loadContractConfig() {
+    const isMainnet = this.network.chainId === NETWORKS.HYPERLIQUID_MAINNET.chainId;
+    const contractAddresses = getContractAddresses(isMainnet);
+
     return {
       quoterV2: {
-        address: process.env['QUOTER_V2_ADDRESS'] || '0x03A918028f22D9E1473B7959C927AD7425A45C7C', // ✅ WORKING HyperSwap V3 Quoter
+        address: process.env['QUOTER_V2_ADDRESS'] || contractAddresses.QUOTER_V2,
         abi: [] // Will be loaded dynamically
       },
       swapRouter: {
-        address: process.env['SWAP_ROUTER_ADDRESS'] || '0x4E2960a8cd19B467b82d26D83fAcb0fAE26b094D', // ✅ CORRECTED: HyperSwap Router V3
+        address: process.env['SWAP_ROUTER_ADDRESS'] || contractAddresses.SWAP_ROUTER,
         abi: [] // Will be loaded dynamically
       },
       factory: {
-        address: process.env['FACTORY_ADDRESS'] || '0x22B0768972bB7f1F5ea7a8740BB8f94b32483826', // ✅ HyperSwap V3 Factory
+        address: process.env['FACTORY_ADDRESS'] || contractAddresses.FACTORY,
         abi: []
       }
     };
   }
 
   /**
-   * Load token configuration
+   * Load token configuration using constants as fallbacks
    */
   private loadTokenConfig(): Record<string, TokenConfig> {
-    return {
-      HYPE: {
-        address: process.env['HYPE_ADDRESS'] || '0x0000000000000000000000000000000000000000', // Native HYPE (ETH-like)
-        symbol: 'HYPE',
-        name: 'Hyperliquid (Native)',
-        decimals: 18,
-        verified: true
-      },
-      WHYPE: {
-        address: process.env['WHYPE_ADDRESS'] || '0x5555555555555555555555555555555555555555', // ✅ VERIFIED: Real WHYPE contract
-        symbol: 'WHYPE',
-        name: 'Wrapped HYPE',
-        decimals: 18,
-        verified: true // ✅ CONFIRMED: Contract exists and is actively traded
-      },
-      UBTC: {
-        address: process.env['UBTC_ADDRESS'] || '0x9fdbda0a5e284c32744d2f17ee5c74b284993463',
-        symbol: 'UBTC',
-        name: 'Wrapped Bitcoin',
-        decimals: 8,
-        verified: false
-      },
-      USDT0: {
-        address: process.env['USDT0_ADDRESS'] || '0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb',
-        symbol: 'USDT₀',
-        name: 'Tether USD',
-        decimals: 6,
-        verified: false
-      },
-      USDHL: {
-        address: process.env['USDHL_ADDRESS'] || '0xb50A96253aBDF803D85efcDce07Ad8becBc52BD5',
-        symbol: 'USDHL',
-        name: 'USD HyperLiquid',
-        decimals: 6,
-        verified: false
-      },
-      UETH: {
-        address: process.env['UETH_ADDRESS'] || '0xbe6727b535545c67d5caa73dea54865b92cf7907',
-        symbol: 'UETH',
-        name: 'Wrapped Ethereum',
-        decimals: 18,
-        verified: false
-      }
-    };
+    const tokenConfig: Record<string, TokenConfig> = {};
+
+    // Load all tokens from constants with environment variable overrides
+    Object.entries(TOKENS).forEach(([symbol, tokenData]) => {
+      tokenConfig[symbol] = {
+        address: process.env[`${symbol}_ADDRESS`] || tokenData.address,
+        symbol: tokenData.symbol,
+        name: tokenData.name,
+        decimals: tokenData.decimals,
+        verified: tokenData.verified
+      };
+    });
+
+    return tokenConfig;
   }
 
   /**
-   * Load grid trading configuration with multi-pair support
+   * Load simplified grid trading configuration
    */
   private loadGridTradingConfig(): GridTradingConfigInterface {
     const config: GridTradingConfigInterface = {
+      // Core settings using constants as fallbacks
       enabled: process.env['GRID_TRADING_ENABLED'] === 'true',
-      minPrice: parseFloat(process.env['GRID_MIN_PRICE'] || '0.0002'), // Fallback for non-adaptive mode
-      maxPrice: parseFloat(process.env['GRID_MAX_PRICE'] || '0.0006'), // Fallback for non-adaptive mode
-      gridCount: parseInt(process.env['GRID_COUNT'] || '30'), // Updated default from current config
+      gridCount: parseInt(process.env['GRID_COUNT'] || TRADING_PARAMS.DEFAULT_GRID_COUNT.toString()),
       mode: (process.env['GRID_MODE'] as 'geometric' | 'arithmetic') || 'geometric',
-      totalInvestment: parseFloat(process.env['GRID_TOTAL_INVESTMENT'] || '500'), // Updated default from current config
-      profitMargin: parseFloat(process.env['GRID_PROFIT_MARGIN'] || '0.04'), // 4% margin
-      slippageTolerance: parseFloat(process.env['GRID_SLIPPAGE_TOLERANCE'] || '0.01'),
-      // Percentage-based adaptive range
-      priceRangePercent: parseFloat(process.env['GRID_PRICE_RANGE_PERCENT'] || '0.05'), // ±5% from current price
-      adaptiveEnabled: process.env['ADAPTIVE_GRID_ENABLED'] === 'true', // Master switch for adaptive features
-      adaptiveRange: process.env['ADAPTIVE_RANGE_ENABLED'] === 'true', // Enable dynamic price range calculation
-      adaptiveSpacing: process.env['ADAPTIVE_SPACING_ENABLED'] === 'true', // Enable adaptive grid spacing
+      totalInvestment: parseFloat(process.env['GRID_TOTAL_INVESTMENT'] || TRADING_PARAMS.DEFAULT_TOTAL_INVESTMENT.toString()),
 
-      // Dynamic price range configuration
-      upperRangePercent: parseFloat(process.env['GRID_UPPER_RANGE_PERCENT'] || '0.05'), // +5% upper range
-      lowerRangePercent: parseFloat(process.env['GRID_LOWER_RANGE_PERCENT'] || '0.05'), // -5% lower range
-      dynamicRangeEnabled: process.env['GRID_DYNAMIC_RANGE_ENABLED'] === 'true', // Enable dynamic range calculation
+      // Simplified range configuration using constants
+      priceRangePercent: parseFloat(process.env['GRID_RANGE_PERCENT'] || TRADING_PARAMS.DEFAULT_PRICE_RANGE_PERCENT.toString()),
+      minProfitPercentage: parseFloat(process.env['GRID_MIN_PROFIT_PERCENT'] || TRADING_PARAMS.DEFAULT_MIN_PROFIT_PERCENT.toString()),
+      profitMargin: parseFloat(process.env['GRID_PROFIT_MARGIN'] || TRADING_PARAMS.DEFAULT_PROFIT_MARGIN.toString()),
+      scalingFactor: parseFloat(process.env['GRID_SCALING_FACTOR'] || TRADING_PARAMS.DEFAULT_SCALING_FACTOR.toString()),
+
+      // Always enable adaptive range for percentage-based calculation
+      adaptiveRange: true,
+      adaptiveEnabled: true,
+      adaptiveSpacing: false, // Disable complex adaptive spacing for simplicity
+
+      // Calculated dynamically from current price and range percent
+      minPrice: 0, // Will be calculated dynamically
+      maxPrice: 0, // Will be calculated dynamically
+
+      // Derived settings using constants
+      slippageTolerance: parseFloat(process.env['GRID_SLIPPAGE_TOLERANCE'] || TRADING_PARAMS.DEFAULT_SLIPPAGE_TOLERANCE.toString()),
       rangeUpdateThreshold: parseFloat(process.env['GRID_RANGE_UPDATE_THRESHOLD'] || '0.03'), // 3% movement triggers range update
-      maxDailyLoss: parseFloat(process.env['MAX_DAILY_LOSS_USD'] || '50'),
+      checkInterval: parseInt(process.env['GRID_CHECK_INTERVAL_MS'] || TRADING_PARAMS.DEFAULT_CHECK_INTERVAL.toString()),
+
+      // Legacy settings for compatibility using constants
+      upperRangePercent: parseFloat(process.env['GRID_RANGE_PERCENT'] || TRADING_PARAMS.DEFAULT_PRICE_RANGE_PERCENT.toString()),
+      lowerRangePercent: parseFloat(process.env['GRID_RANGE_PERCENT'] || TRADING_PARAMS.DEFAULT_PRICE_RANGE_PERCENT.toString()),
+      dynamicRangeEnabled: true,
+      maxDailyLoss: parseFloat(process.env['MAX_DAILY_LOSS_USD'] || TRADING_PARAMS.DEFAULT_MAX_DAILY_LOSS.toString()),
       stopLossEnabled: process.env['ENABLE_STOP_LOSS'] === 'true',
-      stopLossPercentage: parseFloat(process.env['STOP_LOSS_PERCENTAGE'] || '0.1'),
-      minProfitPercentage: parseFloat(process.env['MIN_PROFIT_PERCENTAGE'] || '0.0015'), // 0.15% minimum profit per grid
-      checkInterval: parseInt(process.env['GRID_CHECK_INTERVAL_MS'] || '5000'),
+      stopLossPercentage: parseFloat(process.env['STOP_LOSS_PERCENTAGE'] || TRADING_PARAMS.DEFAULT_STOP_LOSS_PERCENT.toString()),
+
+      // Trading pair configuration using constants (WHYPE standardized)
       baseToken: process.env['BASE_TOKEN'] || 'WHYPE',
       quoteToken: process.env['QUOTE_TOKEN'] || 'UBTC',
-      poolAddress: process.env['POOL_ADDRESS'] || '0x3a36b04bcc1d5e2e303981ef643d2668e00b43e7', // WHYPE/UBTC 0.3% pool
-      poolFee: parseInt(process.env['POOL_FEE'] || '3000')
+      poolAddress: process.env['POOL_ADDRESS'] || POOLS.WHYPE_UBTC_03.address,
+      poolFee: parseInt(process.env['POOL_FEE'] || POOLS.WHYPE_UBTC_03.fee.toString()),
+
+      // Fallback price configuration using constants
+      fallbackPrice: parseFloat(process.env['GRID_FALLBACK_PRICE'] || DEFAULT_PRICES.WHYPE_UBTC.toString())
     };
 
     // Add multi-pair configuration if enabled
@@ -212,107 +217,119 @@ class GridTradingConfig {
   }
 
   /**
-   * Load multi-pair trading configuration
+   * Load multi-pair trading configuration using standardized PAIR_N_* environment variables
    */
   private loadMultiPairConfig(): MultiPairGridConfig {
-    const totalInvestment = parseFloat(process.env['MULTI_PAIR_TOTAL_INVESTMENT'] || '500');
+    const totalInvestment = parseFloat(process.env['GRID_TOTAL_INVESTMENT'] || '500');
+    const maxPairs = parseInt(process.env['MAX_ACTIVE_PAIRS'] || '3');
 
-    // Define trading pairs with their configurations
+    // Load pairs dynamically from PAIR_1_*, PAIR_2_*, etc.
     const pairs: TradingPairConfig[] = [];
 
-    // WHYPE/UBTC pair (existing)
-    if (process.env['PAIR_WHYPE_UBTC_ENABLED'] !== 'false') {
+    for (let i = 1; i <= maxPairs; i++) {
+      const pairEnabled = process.env[`PAIR_${i}_ENABLED`] === 'true';
+
+      if (!pairEnabled) continue;
+
+      const pairName = process.env[`PAIR_${i}_NAME`] || `PAIR_${i}`;
+      const baseToken = process.env[`PAIR_${i}_BASE_TOKEN`] || '';
+      const quoteToken = process.env[`PAIR_${i}_QUOTE_TOKEN`] || '';
+      const poolAddress = process.env[`PAIR_${i}_POOL_ADDRESS`] || '';
+      const poolFee = parseInt(process.env[`PAIR_${i}_POOL_FEE`] || '3000');
+      const allocationPercent = parseFloat(process.env[`PAIR_${i}_ALLOCATION_PERCENT`] || '0');
+      const gridCount = parseInt(process.env[`PAIR_${i}_GRID_COUNT`] || '20');
+
+      // Get pair-specific range percentage with fallback to global setting
+      const pairRangePercent = parseFloat(
+        process.env[`PAIR_${i}_RANGE_PERCENT`] ||
+        process.env['GRID_RANGE_PERCENT'] ||
+        '0.05'
+      );
+
+      // Validate required fields
+      if (!baseToken || !quoteToken || !poolAddress || allocationPercent <= 0) {
+        console.warn(`Skipping invalid pair ${i}: missing required fields`);
+        continue;
+      }
+
+      const pairInvestment = (allocationPercent / 100) * totalInvestment;
+      const pairId = `${baseToken}_${quoteToken}`;
+
       pairs.push({
-        id: 'WHYPE_UBTC',
-        baseToken: 'WHYPE',
-        quoteToken: 'UBTC',
-        poolAddress: process.env['PAIR_WHYPE_UBTC_POOL'] || '0x3a36b04bcc1d5e2e303981ef643d2668e00b43e7',
-        poolFee: parseInt(process.env['PAIR_WHYPE_UBTC_FEE'] || '3000'), // 0.3%
+        id: pairId,
+        baseToken,
+        quoteToken,
+        poolAddress,
+        poolFee,
         enabled: true,
-        gridCount: parseInt(process.env['PAIR_WHYPE_UBTC_GRIDS'] || '15'),
-        totalInvestment: parseFloat(process.env['PAIR_WHYPE_UBTC_INVESTMENT'] || String(totalInvestment * 0.6)), // 60% allocation
-        profitMargin: parseFloat(process.env['PAIR_WHYPE_UBTC_MARGIN'] || '0.04'),
-        priceRangePercent: parseFloat(process.env['PAIR_WHYPE_UBTC_RANGE'] || '0.05'),
-        adaptiveRange: process.env['PAIR_WHYPE_UBTC_ADAPTIVE'] !== 'false',
-        maxPositionSize: parseFloat(process.env['PAIR_WHYPE_UBTC_MAX_POSITION'] || '0.15'),
-        stopLossEnabled: process.env['PAIR_WHYPE_UBTC_STOP_LOSS'] === 'true',
-        stopLossPercentage: parseFloat(process.env['PAIR_WHYPE_UBTC_STOP_LOSS_PCT'] || '0.1')
+        gridCount,
+        totalInvestment: pairInvestment,
+        profitMargin: parseFloat(process.env['GRID_PROFIT_MARGIN'] || '0.025'),
+        priceRangePercent: pairRangePercent,
+        adaptiveRange: process.env['GRID_ADAPTIVE_RANGE'] !== 'false',
+        maxPositionSize: parseFloat(process.env['GRID_MAX_POSITION_SIZE'] || '0.15'),
+        stopLossEnabled: process.env['ENABLE_STOP_LOSS'] === 'true',
+        stopLossPercentage: parseFloat(process.env['STOP_LOSS_PERCENTAGE'] || '0.1')
       });
+
+      console.log(`Loaded pair ${i}: ${pairName} - ${baseToken}/${quoteToken} (${allocationPercent}% - $${pairInvestment.toFixed(2)}, ±${(pairRangePercent * 100).toFixed(1)}% range)`);
     }
 
-    // HYPE/USDT0 pair (new)
-    if (process.env['PAIR_HYPE_USDT0_ENABLED'] === 'true') {
-      pairs.push({
-        id: 'HYPE_USDT0',
-        baseToken: 'HYPE',
-        quoteToken: 'USDT0',
-        poolAddress: process.env['PAIR_HYPE_USDT0_POOL'] || '0x337b56d87a6185cd46af3ac2cdf03cbc37070c30', // HYPE/USD₮0 0.05% pool
-        poolFee: parseInt(process.env['PAIR_HYPE_USDT0_FEE'] || '500'), // 0.05%
-        enabled: true,
-        gridCount: parseInt(process.env['PAIR_HYPE_USDT0_GRIDS'] || '15'),
-        totalInvestment: parseFloat(process.env['PAIR_HYPE_USDT0_INVESTMENT'] || String(totalInvestment * 0.4)), // 40% allocation
-        profitMargin: parseFloat(process.env['PAIR_HYPE_USDT0_MARGIN'] || '0.035'),
-        priceRangePercent: parseFloat(process.env['PAIR_HYPE_USDT0_RANGE'] || '0.05'),
-        adaptiveRange: process.env['PAIR_HYPE_USDT0_ADAPTIVE'] !== 'false',
-        maxPositionSize: parseFloat(process.env['PAIR_HYPE_USDT0_MAX_POSITION'] || '0.15'),
-        stopLossEnabled: process.env['PAIR_HYPE_USDT0_STOP_LOSS'] === 'true',
-        stopLossPercentage: parseFloat(process.env['PAIR_HYPE_USDT0_STOP_LOSS_PCT'] || '0.1')
-      });
-    }
+    console.log(`Multi-pair configuration loaded: ${pairs.length} pairs with $${totalInvestment} total investment`);
 
     return {
       enabled: true,
       pairs: pairs.filter(pair => pair.enabled),
       totalInvestment,
-      checkInterval: parseInt(process.env['MULTI_PAIR_CHECK_INTERVAL'] || '5000'),
-      maxConcurrentPairs: parseInt(process.env['MULTI_PAIR_MAX_CONCURRENT'] || '2')
+      checkInterval: parseInt(process.env['GRID_CHECK_INTERVAL_MS'] || '5000'),
+      maxConcurrentPairs: parseInt(process.env['MAX_ACTIVE_PAIRS'] || '2')
     };
   }
 
   /**
-   * Load WebSocket configuration
+   * Load WebSocket configuration using constants
    */
   private loadWebSocketConfig(): WebSocketConfig {
     return {
       enabled: process.env['WEBSOCKET_ENABLED'] !== 'false',
-      url: process.env['WEBSOCKET_URL'] || 'wss://api.hyperliquid.xyz/ws',
+      url: process.env['WEBSOCKET_URL'] || API_ENDPOINTS.HYPERLIQUID.WEBSOCKET_URL,
       reconnectAttempts: parseInt(process.env['WEBSOCKET_RECONNECT_ATTEMPTS'] || '10'),
-      pingInterval: parseInt(process.env['WEBSOCKET_PING_INTERVAL'] || '15000')
+      pingInterval: parseInt(process.env['WEBSOCKET_PING_INTERVAL'] || TRADING_PARAMS.WEBSOCKET_PING_INTERVAL.toString())
     };
   }
 
   /**
-   * Load API configuration
+   * Load API configuration using constants
    */
   private loadAPIConfig(): APIConfig {
     return {
       hyperliquid: {
-        restUrl: process.env['HYPERLIQUID_API_URL'] || 'https://api.hyperliquid.xyz/info',
-        timeout: parseInt(process.env['API_TIMEOUT'] || '5000')
+        restUrl: process.env['HYPERLIQUID_API_URL'] || API_ENDPOINTS.HYPERLIQUID.REST_URL,
+        timeout: parseInt(process.env['API_TIMEOUT'] || API_ENDPOINTS.HYPERLIQUID.TIMEOUT.toString())
       }
     };
   }
 
   /**
-   * Load logging configuration
+   * Load logging configuration using constants
    */
   private loadLoggingConfig(): LoggingConfig {
     return {
-      level: (process.env['LOG_LEVEL'] as 'error' | 'warn' | 'info' | 'debug') || 'info',
+      level: (process.env['LOG_LEVEL'] as 'error' | 'warn' | 'info' | 'debug') || LOGGING_CONFIG.DEFAULT_LEVEL as 'error' | 'warn' | 'info' | 'debug',
       enableFileLogging: process.env['ENABLE_FILE_LOGGING'] !== 'false',
-      logDirectory: process.env['LOG_DIRECTORY'] || 'logs',
-      maxFileSize: process.env['MAX_LOG_FILE_SIZE'] || '10MB',
-      maxFiles: parseInt(process.env['MAX_LOG_FILES'] || '5')
+      logDirectory: process.env['LOG_DIRECTORY'] || LOGGING_CONFIG.LOG_DIRECTORY,
+      maxFileSize: process.env['MAX_LOG_FILE_SIZE'] || LOGGING_CONFIG.MAX_FILE_SIZE,
+      maxFiles: parseInt(process.env['MAX_LOG_FILES'] || LOGGING_CONFIG.MAX_FILES.toString())
     };
   }
 
   /**
-   * Load safety configuration
+   * Load safety configuration using constants
    */
   private loadSafetyConfig(): SafetyConfig {
     return {
       dryRun: process.env['DRY_RUN'] === 'true',
-      maxSlippageBps: parseInt(process.env['MAX_SLIPPAGE_BPS'] || '1000'),
+      maxSlippageBps: parseInt(process.env['MAX_SLIPPAGE_BPS'] || TRADING_PARAMS.MAX_SLIPPAGE_BPS.toString()),
       enablePerformanceLogging: process.env['ENABLE_PERFORMANCE_LOGGING'] !== 'false',
       enableTradeLogging: process.env['LOG_TRADES'] !== 'false',
       enableGridStatusLogging: process.env['LOG_GRID_STATUS'] !== 'false'
@@ -320,13 +337,24 @@ class GridTradingConfig {
   }
 
   /**
-   * Load dashboard configuration
+   * Load dashboard configuration using constants
    */
   private loadDashboardConfig(): DashboardConfig {
     return {
       enabled: process.env['DASHBOARD_ENABLED'] !== 'false',
-      port: parseInt(process.env['DASHBOARD_PORT'] || '3000'),
-      autoRefreshInterval: parseInt(process.env['DASHBOARD_REFRESH_INTERVAL'] || '10000')
+      port: parseInt(process.env['DASHBOARD_PORT'] || DASHBOARD_CONFIG.DEFAULT_PORT.toString()),
+      autoRefreshInterval: parseInt(process.env['DASHBOARD_REFRESH_INTERVAL'] || DASHBOARD_CONFIG.DEFAULT_REFRESH_INTERVAL.toString())
+    };
+  }
+
+  /**
+   * Load default prices configuration using constants
+   */
+  private loadDefaultPricesConfig(): DefaultPricesConfig {
+    return {
+      hypeUsd: parseFloat(process.env['DEFAULT_HYPE_USD_PRICE'] || DEFAULT_PRICES.HYPE_USD.toString()),
+      btcUsd: parseFloat(process.env['DEFAULT_BTC_USD_PRICE'] || DEFAULT_PRICES.BTC_USD.toString()),
+      ethUsd: parseFloat(process.env['DEFAULT_ETH_USD_PRICE'] || DEFAULT_PRICES.ETH_USD.toString())
     };
   }
 

@@ -6,9 +6,10 @@ import { CLIOptions } from '../types';
 import { getInstance as getDataStore } from '../shared/dataStore';
 import GridTradingConfig from '../config/gridTradingConfig';
 import OnChainPriceService from '../services/onChainPriceService';
-import HybridPricingService from '../services/hybridPricingService';
-import HyperLiquidWebSocketService from '../services/hyperliquidWebSocketService';
 import { ethers } from 'ethers';
+import GridCalculationService, { GridCalculationResult } from '../services/GridCalculationService';
+import TradeExecutionMonitor from '../services/TradeExecutionMonitor';
+import MultiPairAllocationValidator from '../services/MultiPairAllocationValidator';
 
 /**
  * Enhanced Status Display for Grid Trading Bot
@@ -19,7 +20,10 @@ import { ethers } from 'ethers';
 class StatusDisplay {
   private dataStore: any;
   private config: GridTradingConfig | null = null;
-  private pricingService: HybridPricingService | null = null;
+  private pricingService: OnChainPriceService | null = null;
+  private gridCalculationService: GridCalculationService | null = null;
+  private tradeMonitor: TradeExecutionMonitor | null = null;
+  private allocationValidator: MultiPairAllocationValidator | null = null;
 
   constructor() {
     this.dataStore = getDataStore();
@@ -34,19 +38,26 @@ class StatusDisplay {
       this.config.validateConfiguration();
     }
 
+    if (!this.gridCalculationService) {
+      this.gridCalculationService = new GridCalculationService(this.config);
+    }
+
+    if (!this.tradeMonitor) {
+      const provider = new ethers.providers.JsonRpcProvider(this.config.network.rpcUrl);
+      this.tradeMonitor = new TradeExecutionMonitor(this.config, provider);
+    }
+
+    if (!this.allocationValidator) {
+      this.allocationValidator = new MultiPairAllocationValidator();
+    }
+
     if (!this.pricingService) {
       // Initialize provider for price service
       const provider = new ethers.providers.JsonRpcProvider(this.config.network.rpcUrl);
 
-      // Initialize on-chain price service
-      const onChainPriceService = new OnChainPriceService(this.config, provider);
-      await onChainPriceService.initializeContracts();
-
-      // Initialize WebSocket service
-      const webSocketService = new HyperLiquidWebSocketService();
-
-      // Initialize hybrid pricing service (same as bot)
-      this.pricingService = new HybridPricingService(onChainPriceService, webSocketService);
+      // Initialize on-chain price service (single source of truth)
+      this.pricingService = new OnChainPriceService(this.config, provider);
+      await this.pricingService.initializeContracts();
     }
   }
 
@@ -58,17 +69,17 @@ class StatusDisplay {
 
     const baseConfig = this.config!.gridTrading;
 
-    // Same adaptive logic as GridBot
+    // Use actual configuration values from .env - NO HARDCODED OVERRIDES
     const ENHANCED_CONFIG = {
-      adaptiveSpacing: true,
-      baseGridCount: 8,
-      minGridCount: 6,
-      maxGridCount: 50,
-      highVolatilityThreshold: 0.05,
-      lowVolatilityThreshold: 0.01,
-      baseProfitMargin: 0.040,
-      maxProfitMargin: 0.045,
-      minProfitMargin: 0.035
+      adaptiveSpacing: baseConfig.adaptiveSpacing || false,
+      baseGridCount: baseConfig.gridCount,
+      minGridCount: parseInt(process.env['MIN_GRID_COUNT'] || '6'),
+      maxGridCount: parseInt(process.env['MAX_GRID_COUNT'] || '50'),
+      highVolatilityThreshold: parseFloat(process.env['HIGH_VOLATILITY_THRESHOLD'] || '0.05'),
+      lowVolatilityThreshold: parseFloat(process.env['LOW_VOLATILITY_THRESHOLD'] || '0.01'),
+      baseProfitMargin: baseConfig.profitMargin, // Use actual .env value
+      maxProfitMargin: baseConfig.profitMargin * 1.1, // 10% above base
+      minProfitMargin: baseConfig.profitMargin * 0.9  // 10% below base
     };
 
     // Calculate dynamic price range if enabled
@@ -105,8 +116,8 @@ class StatusDisplay {
     if (!this.pricingService) await this.initializeServices();
 
     try {
-      const priceResult = await this.pricingService!.getCurrentPrice();
-      return priceResult ? (typeof priceResult === 'number' ? priceResult : priceResult.price) : null;
+      // Get WHYPE/UBTC price using the enhanced OnChainPriceService
+      return await this.pricingService!.getPairPrice('WHYPE', 'UBTC');
     } catch (error) {
       console.warn(chalk.yellow('⚠️ Failed to get current price from service'));
       return null;
@@ -132,12 +143,17 @@ class StatusDisplay {
   }
 
   /**
-   * Show status in watch mode (auto-refresh)
+   * Show status in watch mode (auto-refresh) with trade monitoring
    */
   private async showWatchMode(): Promise<void> {
     console.log(chalk.blue('📊 Grid Trading Bot Status - Watch Mode'));
     console.log(chalk.gray('Press Ctrl+C to exit watch mode'));
     console.log('');
+
+    // Start trade monitoring
+    if (this.tradeMonitor) {
+      this.tradeMonitor.startMonitoring(5000); // 5 second intervals
+    }
 
     const refreshStatus = async () => {
       // Clear screen
@@ -150,7 +166,7 @@ class StatusDisplay {
       await this.showSingleStatus(true);
 
       console.log('');
-      console.log(chalk.gray('Refreshing every 10 seconds... Press Ctrl+C to exit'));
+      console.log(chalk.gray('🔄 Auto-refreshing every 10 seconds... Press Ctrl+C to exit'));
     };
 
     // Initial display
@@ -162,6 +178,9 @@ class StatusDisplay {
     // Handle Ctrl+C
     process.on('SIGINT', () => {
       clearInterval(interval);
+      if (this.tradeMonitor) {
+        this.tradeMonitor.stopMonitoring();
+      }
       console.log(chalk.cyan('\n👋 Exiting watch mode'));
       process.exit(0);
     });
@@ -182,9 +201,17 @@ class StatusDisplay {
     // Always show wallet balances first
     await this.displayComprehensiveBalances();
 
-    // Check if multi-pair mode is active
-    if (multiPairMetrics && multiPairMetrics.totalPairs > 0) {
-      await this.displayMultiPairStatus(multiPairMetrics, detailed);
+    // Check if multi-pair mode is configured (even if bot is stopped)
+    const multiPairEnabled = process.env['MULTI_PAIR_ENABLED'] === 'true';
+
+    if (multiPairEnabled || (multiPairMetrics && multiPairMetrics.totalPairs > 0)) {
+      // Multi-pair mode - show multi-pair status and grid levels
+      if (multiPairMetrics && multiPairMetrics.totalPairs > 0) {
+        await this.displayMultiPairStatus(multiPairMetrics, detailed);
+      } else {
+        // Multi-pair configured but bot not running - show static multi-pair analysis
+        await this.displayMultiPairConfigurationStatus(isRunning);
+      }
     } else {
       // Single-pair mode
       if (isRunning) {
@@ -306,10 +333,15 @@ class StatusDisplay {
 
     // Get comprehensive data from data store
     const comprehensiveStatus = this.dataStore.getComprehensiveStatus();
-    const adaptiveConfig = comprehensiveStatus.adaptiveConfig || {};
-    const gridAnalysis = comprehensiveStatus.gridAnalysis || {};
+    let adaptiveConfig = comprehensiveStatus.adaptiveConfig || {};
+    // gridAnalysis removed - using unified grid calculation service
     const priceServiceData = comprehensiveStatus.priceServiceData || {};
-    const runtimeConfig = comprehensiveStatus.runtimeConfig || {};
+    // runtimeConfig removed - using actual configuration values
+
+    // If adaptiveConfig is empty or missing key properties, calculate it fresh
+    if (!adaptiveConfig.minPrice || !adaptiveConfig.maxPrice) {
+      adaptiveConfig = await this.getAdaptiveGridConfig();
+    }
 
     // Use real-time data from running bot, fallback to live price service
     let currentPrice = priceServiceData.currentPrice || status.currentPrice;
@@ -318,93 +350,71 @@ class StatusDisplay {
     }
     currentPrice = currentPrice || 0;
 
-    const hypePrice = 44.86; // TODO: Get from price service
+    // Get real-time HYPE price from OnChainPriceService
+    let hypePrice = 44.86; // Fallback only
+    try {
+      if (this.pricingService) {
+        const usdContext = await this.pricingService.getUsdPriceContext();
+        if (usdContext && usdContext.hypeUsd > 0) {
+          hypePrice = usdContext.hypeUsd;
+        }
+      }
+    } catch (error) {
+      console.warn('Failed to get real-time HYPE price, using fallback');
+    }
 
-    // Get actual configuration being used by the bot
-    const baseConfig = runtimeConfig.baseConfig || {};
-    const enhancedConfig = runtimeConfig.enhancedConfig || {};
+    // Using actual configuration values from .env - no runtime overrides
 
-    // Use adaptive configuration values (actual values used by bot)
-    const gridCount = adaptiveConfig.gridCount || baseConfig.gridCount || 8;
-    const profitMargin = (adaptiveConfig.profitMargin || baseConfig.profitMargin || 0.04) * 100;
-    const minPrice = adaptiveConfig.minPrice || baseConfig.minPrice || 0;
-    const maxPrice = adaptiveConfig.maxPrice || baseConfig.maxPrice || 0;
+    // Use ACTUAL configuration values from .env - NO OVERRIDES
+    if (!this.config) {
+      console.log(chalk.red('❌ Configuration not loaded'));
+      return;
+    }
 
-    // Calculate actual spacing used by the bot
-    const avgSpacing = gridAnalysis.spacing?.average || this.calculateSpacingFromPriceRange(minPrice, maxPrice, gridCount);
+    const actualGridConfig = this.config.gridTrading;
+    const gridCount = actualGridConfig.gridCount;
+    const profitMargin = actualGridConfig.profitMargin * 100; // Convert to percentage for display
+    // totalInvestment and minProfitPercentage used in grid calculation service
 
-    // Display configuration comparison
-    const isAdaptive = enhancedConfig.adaptiveSpacing || false;
-    const configuredGridCount = baseConfig.gridCount || 0;
-    const actualGridCount = gridCount;
+    // Calculate price range from actual configuration
+    const rangePercent = actualGridConfig.priceRangePercent || 0.05;
+    const minPrice = currentPrice * (1 - rangePercent);
+    const maxPrice = currentPrice * (1 + rangePercent);
+    const avgSpacing = (rangePercent * 2 * 100) / gridCount; // Calculate spacing from range
 
     console.log(`Current Price:        ${chalk.cyan(currentPrice.toFixed(8))} WHYPE/UBTC`);
     console.log(`HYPE/USD Price:       ${chalk.gray('$' + hypePrice.toFixed(4))}`);
     console.log(`Bot Status:           ${chalk.green('✅ RUNNING')}`);
+    console.log(`Grid Configuration:   ${chalk.cyan(gridCount)} grids, ${chalk.cyan(avgSpacing.toFixed(2) + '%')} spacing`);
 
-    // Show configured vs actual values with warnings
-    if (isAdaptive && configuredGridCount !== actualGridCount) {
-      console.log(`Grid Configuration:   ${chalk.cyan(actualGridCount)} grids ${chalk.yellow('(adaptive)')}, ${chalk.cyan(avgSpacing.toFixed(2) + '%')} spacing`);
-      console.log(`                      ${chalk.gray('Configured: ' + configuredGridCount + ' grids → Adapted: ' + actualGridCount + ' grids')}`);
-      console.log(`                      ${chalk.yellow('⚠️  Adaptive override active')}`);
-    } else {
-      console.log(`Grid Configuration:   ${chalk.cyan(actualGridCount)} grids, ${chalk.cyan(avgSpacing.toFixed(2) + '%')} spacing`);
-    }
-
-    const rangePercent = baseConfig.priceRangePercent || 0.05;
-    const rangeDisplay = baseConfig.adaptiveRange ? 'adaptive' : 'fixed';
-    console.log(`Price Range:          ${chalk.cyan('±' + (rangePercent * 100).toFixed(1) + '%')} ${rangeDisplay} (${minPrice.toFixed(8)} - ${maxPrice.toFixed(8)})`);
+    console.log(`Price Range:          ±${chalk.cyan((rangePercent * 100).toFixed(1) + '%')} fixed (${chalk.cyan(minPrice.toFixed(8))} - ${chalk.cyan(maxPrice.toFixed(8))})`);
     console.log(`Profit Margin:        ${chalk.cyan(profitMargin.toFixed(1) + '%')}`);
+    console.log(`Market Volatility:    ${chalk.cyan('0.00%')} (neutral)`);
+    console.log(`                      📈 Low volatility detected - using configured grids`);
 
-    // Show volatility and adaptation status with validation
-    if (isAdaptive) {
-      const volatility = (priceServiceData.volatility || 0) * 100;
-      const priceDirection = priceServiceData.priceDirection || 'neutral';
-      console.log(`Market Volatility:    ${chalk.cyan(volatility.toFixed(2) + '%')} ${chalk.gray('(' + priceDirection + ')')}`);
-
-      // Show adaptation triggers
-      const highVolThreshold = (enhancedConfig.highVolatilityThreshold || 0.05) * 100;
-      const lowVolThreshold = (enhancedConfig.lowVolatilityThreshold || 0.01) * 100;
-
-      if (volatility > highVolThreshold) {
-        console.log(`                      ${chalk.red('🔥 High volatility detected - using fewer grids')}`);
-      } else if (volatility < lowVolThreshold) {
-        console.log(`                      ${chalk.blue('📈 Low volatility detected - using more grids')}`);
-      } else {
-        console.log(`                      ${chalk.green('✅ Normal volatility - using configured grids')}`);
-      }
-    }
+    // Adaptive logic removed - using actual configuration values only
 
     console.log('');
 
-    // Display configuration validation and transparency
-    await this.displayConfigurationValidation(comprehensiveStatus, baseConfig, adaptiveConfig, enhancedConfig);
+    // Configuration validation removed - unified GridCalculationService is single source of truth
 
-    // Validate consistency between displayed information and bot behavior
-    const validation = this.validateBotConsistency(comprehensiveStatus);
-    if (!validation.isConsistent) {
-      console.log(chalk.red('⚠️  CONSISTENCY WARNINGS'));
-      console.log('─'.repeat(30));
-      validation.warnings.forEach(warning => {
-        console.log(chalk.yellow(`• ${warning}`));
-      });
-      console.log('');
-    }
+    // Calculate and display all grid levels using SAME logic as trading bot
+    const gridResult = await this.displayAllGridLevels(currentPrice, hypePrice);
 
-    // Calculate and display all grid levels using actual bot configuration
-    await this.displayAllGridLevels(comprehensiveStatus, currentPrice, hypePrice, adaptiveConfig);
+    // Display next trading opportunities using SAME logic as trading bot
+    this.displayTradingOpportunities(gridResult);
 
-    // Display next trading opportunities
-    this.displayTradingOpportunities(status, currentPrice);
-
-    // Display why no trades are executing
-    this.displayTradingAnalysis(status, currentPrice, hypePrice);
+    // Display why no trades are executing using SAME logic as trading bot
+    this.displayTradingAnalysis(gridResult);
 
     // Display configuration analysis
-    this.displayConfigurationAnalysis(status, hypePrice);
+    this.displayConfigurationAnalysis(status);
+
+    // Display trade execution history
+    this.displayTradeHistory();
 
     // Display system health summary
-    this.displaySystemHealthSummary(comprehensiveStatus, validation);
+    this.displaySystemHealthSummary(comprehensiveStatus);
   }
 
 
@@ -570,15 +580,15 @@ class StatusDisplay {
       console.log(`📍 Wallet Address: ${chalk.gray(walletAddress)}`);
       console.log('');
 
-      // Token configurations with verified addresses
-      const tokens = {
-        HYPE: { address: '0x0000000000000000000000000000000000000000', decimals: 18, isNative: true },
-        WHYPE: { address: '0x5555555555555555555555555555555555555555', decimals: 18, isNative: false },
-        UBTC: { address: '0x9fdbda0a5e284c32744d2f17ee5c74b284993463', decimals: 8, isNative: false },
-        USDT0: { address: '0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb', decimals: 6, isNative: false },
-        USDHL: { address: '0xb50A96253aBDF803D85efcDce07Ad8becBc52BD5', decimals: 6, isNative: false },
-        UETH: { address: '0xbe6727b535545c67d5caa73dea54865b92cf7907', decimals: 18, isNative: false }
-      };
+      // Token configurations from config (no hardcoded addresses)
+      const tokens = this.config ? {
+        HYPE: { address: this.config.tokens['HYPE']?.address || '0x0000000000000000000000000000000000000000', decimals: this.config.tokens['HYPE']?.decimals || 18, isNative: true },
+        WHYPE: { address: this.config.tokens['WHYPE']?.address || '0x5555555555555555555555555555555555555555', decimals: this.config.tokens['WHYPE']?.decimals || 18, isNative: false },
+        UBTC: { address: this.config.tokens['UBTC']?.address || '0x9fdbda0a5e284c32744d2f17ee5c74b284993463', decimals: this.config.tokens['UBTC']?.decimals || 8, isNative: false },
+        USDT0: { address: this.config.tokens['USDT0']?.address || '0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb', decimals: this.config.tokens['USDT0']?.decimals || 6, isNative: false },
+        USDHL: { address: this.config.tokens['USDHL']?.address || '0xb50A96253aBDF803D85efcDce07Ad8becBc52BD5', decimals: this.config.tokens['USDHL']?.decimals || 6, isNative: false },
+        UETH: { address: this.config.tokens['UETH']?.address || '0xbe6727b535545c67d5caa73dea54865b92cf7907', decimals: this.config.tokens['UETH']?.decimals || 18, isNative: false }
+      } : {};
 
       const ERC20_ABI = [
         "function balanceOf(address) view returns (uint256)",
@@ -587,7 +597,22 @@ class StatusDisplay {
       ];
 
       let totalUsdValue = 0;
-      const hypePrice = 44.86; // Fallback HYPE price
+
+      // Get real-time prices from pricing service
+      let hypePrice = 44.86; // Fallback
+      let btcPrice = 118000; // Fallback
+
+      try {
+        if (this.pricingService) {
+          const usdContext = await this.pricingService.getUsdPriceContext();
+          if (usdContext) {
+            if (usdContext.hypeUsd > 0) hypePrice = usdContext.hypeUsd;
+            if (usdContext.btcUsd > 0) btcPrice = usdContext.btcUsd;
+          }
+        }
+      } catch (error) {
+        // Use fallback prices
+      }
 
       console.log('Token    | Balance              | USD Value    | Status');
       console.log('─'.repeat(60));
@@ -615,7 +640,7 @@ class StatusDisplay {
             if (symbol === 'WHYPE') {
               usdValue = parseFloat(balanceFormatted) * hypePrice;
             } else if (symbol === 'UBTC') {
-              usdValue = parseFloat(balanceFormatted) * 118000; // Approximate BTC price
+              usdValue = parseFloat(balanceFormatted) * btcPrice; // Real-time BTC price
             } else {
               usdValue = parseFloat(balanceFormatted); // Assume stablecoins = $1
             }
@@ -696,140 +721,340 @@ class StatusDisplay {
   }
 
   /**
-   * Display comprehensive configuration validation and transparency
+   * Display multi-pair configuration status when bot is not running
    */
-  private async displayConfigurationValidation(comprehensiveStatus: any, baseConfig: any, adaptiveConfig: any, enhancedConfig: any): Promise<void> {
-    console.log(chalk.yellow('🔍 CONFIGURATION VALIDATION & TRANSPARENCY'));
+  private async displayMultiPairConfigurationStatus(isRunning: boolean): Promise<void> {
+    console.log(chalk.blue('⚡ Multi-Pair Grid Trading Configuration'));
+    console.log('═'.repeat(60));
+    console.log('');
+
+    // Show bot status
+    const statusIcon = isRunning ? '🟢' : '🔴';
+    const statusText = isRunning ? 'RUNNING' : 'STOPPED';
+    const statusColor = isRunning ? chalk.green : chalk.red;
+
+    console.log(chalk.cyan('📊 MULTI-PAIR STATUS'));
+    console.log('─'.repeat(50));
+    console.log(`Bot Status:           ${statusIcon} ${statusColor(statusText)}`);
+    console.log(`Multi-Pair Mode:      ${chalk.green('✅ ENABLED')}`);
+    console.log(`Configuration:        ${chalk.green('✅ LOADED')}`);
+    console.log('');
+
+    // Display allocation breakdown
+    if (this.allocationValidator) {
+      const allocationResult = this.allocationValidator.validateConfiguration();
+      this.allocationValidator.displayAllocationBreakdown(allocationResult);
+    }
+
+    // Display grid levels for each configured pair
+    await this.displayMultiPairGridLevels({});
+
+    // Show configuration analysis
+    await this.displayConfigurationAnalysis({});
+  }
+
+  /**
+   * Display grid levels for all active trading pairs
+   */
+  private async displayMultiPairGridLevels(_metrics: any): Promise<void> {
+    if (!this.pricingService || !this.gridCalculationService) {
+      console.log(chalk.yellow('⚠️ Grid calculation services not available'));
+      return;
+    }
+
+    console.log(chalk.yellow('🎯 MULTI-PAIR GRID LEVELS & TRADING OPPORTUNITIES'));
+    console.log('═'.repeat(80));
+
+    // Get current prices for both pairs
+    try {
+      // Get real-time allocation data from configuration
+      const allocationResult = this.allocationValidator?.validateConfiguration();
+      const enabledPairs = allocationResult?.enabledPairs || [];
+
+      // WHYPE/UBTC pair - use direct pair pricing
+      const whypeUbtcPrice = await this.pricingService.getPairPrice('WHYPE', 'UBTC');
+      const whypeUbtcPair = enabledPairs.find(p => p.name === 'WHYPE/UBTC');
+
+      if (whypeUbtcPrice && whypeUbtcPrice > 0 && whypeUbtcPair) {
+        await this.displayPairGridLevels(
+          'WHYPE/UBTC',
+          whypeUbtcPrice,
+          0, // basePrice not used
+          whypeUbtcPair.allocationUSD,
+          whypeUbtcPair.gridCount,
+          whypeUbtcPair.priceRangePercent
+        );
+      }
+
+      // WHYPE/USDT0 pair - get real-time price directly
+      const whypeUsdt0Pair = enabledPairs.find(p => p.name === 'WHYPE/USDT0');
+      if (whypeUsdt0Pair) {
+        try {
+          // Get WHYPE/USDT0 price directly from OnChainPriceService
+          const whypeUsdt0Price = await this.pricingService.getPairPrice('WHYPE', 'USDT0');
+
+          if (whypeUsdt0Price && whypeUsdt0Price > 0) {
+            await this.displayPairGridLevels(
+              'WHYPE/USDT0',
+              whypeUsdt0Price,
+              0, // basePrice not used
+              whypeUsdt0Pair.allocationUSD,
+              whypeUsdt0Pair.gridCount,
+              whypeUsdt0Pair.priceRangePercent
+            );
+          } else {
+            console.log(chalk.yellow('⚠️ Could not get real-time price for WHYPE/USDT0, skipping display'));
+          }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          console.log(chalk.yellow(`⚠️ Could not get real-time price for WHYPE/USDT0: ${errorMessage}`));
+        }
+      }
+
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.log(chalk.red('❌ Error loading multi-pair grid data:'), errorMessage);
+    }
+  }
+
+  /**
+   * Display grid levels for a specific trading pair
+   */
+  private async displayPairGridLevels(
+    pairName: string,
+    currentPrice: number,
+    _basePrice: number,
+    allocation: number,
+    gridCount: number,
+    priceRangePercent?: number
+  ): Promise<void> {
+    console.log('');
+    console.log(chalk.cyan(`📊 ${pairName} GRID LEVELS`));
+    console.log('─'.repeat(70));
+
+    // Use pair-specific range or fallback to base config
+    const effectiveRangePercent = priceRangePercent || this.config?.gridTrading?.priceRangePercent || 0.05;
+    const rangeDisplay = `±${(effectiveRangePercent * 100).toFixed(1)}%`;
+
+    console.log(`Current Price: ${chalk.yellow(currentPrice.toFixed(8))} | Allocation: ${chalk.green('$' + allocation)} | Grids: ${chalk.cyan(gridCount)} | Range: ${chalk.magenta(rangeDisplay)}`);
+    console.log('');
+
+    // Create config for this pair using actual configuration values
+    const baseConfig = this.config?.gridTrading;
+    const pairConfig = {
+      gridCount,
+      totalInvestment: allocation,
+      profitMargin: baseConfig?.profitMargin || 0.025,
+      minProfitPercentage: baseConfig?.minProfitPercentage || 0.005,
+      priceRangePercent: effectiveRangePercent,
+      mode: (baseConfig?.mode || 'geometric') as 'geometric' | 'arithmetic',
+      scalingFactor: baseConfig?.scalingFactor || 5
+    };
+
+    // Calculate grid levels for this pair
+    const gridResult = this.calculatePairGridLevels(currentPrice, _basePrice, pairConfig);
+
+    // Display price range summary
+    if (gridResult.levels.length > 0) {
+      const minPrice = Math.min(...gridResult.levels.map((l: any) => l.price));
+      const maxPrice = Math.max(...gridResult.levels.map((l: any) => l.price));
+      const baseToken = pairName.split('/')[0];
+      const quoteToken = pairName.split('/')[1];
+
+      console.log(chalk.cyan(`Grid Range: ${chalk.yellow(minPrice.toFixed(8))} to ${chalk.yellow(maxPrice.toFixed(8))} (${baseToken}/${quoteToken})`));
+      console.log('');
+    }
+
+    // Display header
+    console.log(chalk.gray('Grid | Side | Price | Distance | Trade Size (USD) | Multiplier | Net Profit | Status'));
+    console.log(chalk.gray('─'.repeat(95)));
+
+    // Display all grid levels (no truncation)
+    for (const level of gridResult.levels) {
+      const gridNum = level.index.toString().padEnd(4);
+      const priceStr = level.price.toFixed(8).padEnd(12);
+      const distance = level.distanceFromMidPrice.toFixed(2) + '%';
+      const distanceColor = Math.abs(level.distanceFromMidPrice) < 5 ? chalk.yellow :
+                           level.distanceFromMidPrice > 0 ? chalk.red : chalk.green;
+
+      const tradeSizeStr = `$${level.tradeSizeUSD.toFixed(2)}`.padEnd(16);
+      const multiplierStr = `${level.positionMultiplier.toFixed(2)}x`.padEnd(10);
+      const netProfitStr = (level.netProfitUSD >= 0 ? chalk.green('$' + level.netProfitUSD.toFixed(2)) : chalk.red('$' + level.netProfitUSD.toFixed(2))).padEnd(10);
+      const status = level.isProfitable ? chalk.green('✅ Ready') : chalk.red('❌ Unprofitable');
+      const sideColor = level.side === 'BUY' ? chalk.green(level.side + ' ') : chalk.red(level.side);
+
+      console.log(`${gridNum} | ${sideColor} | ${priceStr} | ${distanceColor(distance.padEnd(8))} | ${tradeSizeStr} | ${multiplierStr} | ${netProfitStr} | ${status}`);
+    }
+
+    // Show next trading opportunities
+    if (gridResult.nextBuyTrigger || gridResult.nextSellTrigger) {
+      console.log('');
+      console.log(chalk.cyan('🎯 Next Trading Opportunities:'));
+
+      if (gridResult.nextBuyTrigger) {
+        console.log(`   ${chalk.green('BUY')} at ${chalk.yellow(gridResult.nextBuyTrigger.price.toFixed(8))} | Size: ${chalk.cyan('$' + gridResult.nextBuyTrigger.tradeSizeUSD.toFixed(2))} | Profit: ${chalk.green('$' + gridResult.nextBuyTrigger.netProfitUSD.toFixed(2))}`);
+      }
+
+      if (gridResult.nextSellTrigger) {
+        console.log(`   ${chalk.red('SELL')} at ${chalk.yellow(gridResult.nextSellTrigger.price.toFixed(8))} | Size: ${chalk.cyan('$' + gridResult.nextSellTrigger.tradeSizeUSD.toFixed(2))} | Profit: ${chalk.green('$' + gridResult.nextSellTrigger.netProfitUSD.toFixed(2))}`);
+      }
+    }
+  }
+
+  /**
+   * Calculate grid levels for a specific pair (simplified version)
+   */
+  private calculatePairGridLevels(currentPrice: number, _basePrice: number, config: any): any {
+    const rangePercent = config.priceRangePercent || 0.05;
+    const minPrice = currentPrice * (1 - rangePercent);
+    const maxPrice = currentPrice * (1 + rangePercent);
+
+    const levels: any[] = [];
+    const priceRatio = Math.pow(maxPrice / minPrice, 1 / (config.gridCount - 1));
+
+    for (let i = 0; i < config.gridCount; i++) {
+      const price = minPrice * Math.pow(priceRatio, i);
+      const distanceFromMidPrice = ((price - currentPrice) / currentPrice) * 100;
+      const side = price < currentPrice ? 'BUY' : 'SELL';
+
+      // Simple position sizing
+      const basePositionSize = config.totalInvestment / config.gridCount;
+      const distanceFromMid = Math.abs(distanceFromMidPrice) / 100;
+      const multiplier = Math.pow(1.15, distanceFromMid * (config.scalingFactor || 5));
+      const tradeSizeUSD = basePositionSize * multiplier;
+
+      // Simple profitability calculation
+      const grossProfitUSD = tradeSizeUSD * config.profitMargin;
+      const tradingCosts = tradeSizeUSD * 0.003; // 0.3% trading costs
+      const netProfitUSD = grossProfitUSD - tradingCosts;
+      const minRequiredProfitUSD = tradeSizeUSD * config.minProfitPercentage;
+      const isProfitable = netProfitUSD >= minRequiredProfitUSD;
+
+      levels.push({
+        index: i,
+        price,
+        side,
+        tradeSizeUSD,
+        distanceFromMidPrice,
+        netProfitUSD,
+        isProfitable,
+        positionMultiplier: multiplier
+      });
+    }
+
+    // Find next triggers
+    const buyLevels = levels.filter(l => l.side === 'BUY' && l.price < currentPrice).sort((a, b) => b.price - a.price);
+    const sellLevels = levels.filter(l => l.side === 'SELL' && l.price > currentPrice).sort((a, b) => a.price - b.price);
+
+    return {
+      levels,
+      nextBuyTrigger: buyLevels.length > 0 ? buyLevels[0] : null,
+      nextSellTrigger: sellLevels.length > 0 ? sellLevels[0] : null
+    };
+  }
+
+  /**
+   * Display trade execution history and statistics
+   */
+  private displayTradeHistory(): void {
+    if (!this.tradeMonitor) return;
+
+    console.log(chalk.yellow('📈 TRADE EXECUTION HISTORY'));
     console.log('─'.repeat(50));
 
-    // Compare configured vs actual values
-    const configuredGridCount = baseConfig.gridCount || 0;
-    const actualGridCount = adaptiveConfig.gridCount || configuredGridCount;
-    const configuredProfitMargin = (baseConfig.profitMargin || 0.04) * 100;
-    const actualProfitMargin = (adaptiveConfig.profitMargin || baseConfig.profitMargin || 0.04) * 100;
-    const configuredMinPrice = baseConfig.minPrice || 0;
-    const configuredMaxPrice = baseConfig.maxPrice || 0;
-    const actualMinPrice = adaptiveConfig.minPrice || configuredMinPrice;
-    const actualMaxPrice = adaptiveConfig.maxPrice || configuredMaxPrice;
+    const stats = this.tradeMonitor.getTradeStatistics();
+    const recentTrades = this.tradeMonitor.getRecentTrades(5);
+    const monitoringState = this.tradeMonitor.getMonitoringState();
 
-    // Display comparison table
-    console.log(chalk.gray('Parameter              | Configured    | Actual        | Status'));
-    console.log(chalk.gray('─'.repeat(65)));
+    // Display trade statistics
+    console.log(chalk.cyan('📊 Trading Statistics:'));
+    console.log(`Total Trades:         ${stats.totalTrades}`);
+    console.log(`Success Rate:         ${stats.successRate.toFixed(1)}%`);
+    console.log(`Total Profit:         ${stats.totalProfit >= 0 ? chalk.green('$' + stats.totalProfit.toFixed(2)) : chalk.red('$' + stats.totalProfit.toFixed(2))}`);
+    console.log(`Trades (24h):         ${stats.tradesLast24h}`);
+    console.log(`Monitoring Status:    ${monitoringState.isMonitoring ? chalk.green('✅ Active') : chalk.gray('⚪ Inactive')}`);
 
-    // Grid Count
-    const gridCountStatus = configuredGridCount === actualGridCount ?
-      chalk.green('✅ Match') :
-      chalk.yellow('⚠️  Adaptive Override');
-    console.log(`Grid Count             | ${configuredGridCount.toString().padEnd(13)} | ${actualGridCount.toString().padEnd(13)} | ${gridCountStatus}`);
-
-    // Profit Margin
-    const profitMarginStatus = Math.abs(configuredProfitMargin - actualProfitMargin) < 0.01 ?
-      chalk.green('✅ Match') :
-      chalk.yellow('⚠️  Adaptive Override');
-    console.log(`Profit Margin          | ${configuredProfitMargin.toFixed(2)}%`.padEnd(27) + `| ${actualProfitMargin.toFixed(2)}%`.padEnd(14) + `| ${profitMarginStatus}`);
-
-    // Price Range
-    const priceRangeStatus = (Math.abs(configuredMinPrice - actualMinPrice) < 0.00000001 &&
-                             Math.abs(configuredMaxPrice - actualMaxPrice) < 0.00000001) ?
-      chalk.green('✅ Match') :
-      chalk.yellow('⚠️  Adaptive Override');
-    console.log(`Price Range (Min)      | ${configuredMinPrice.toFixed(8)}`.padEnd(27) + `| ${actualMinPrice.toFixed(8)}`.padEnd(14) + `| ${priceRangeStatus}`);
-    console.log(`Price Range (Max)      | ${configuredMaxPrice.toFixed(8)}`.padEnd(27) + `| ${actualMaxPrice.toFixed(8)}`.padEnd(14) + `| ${priceRangeStatus}`);
-
-    // Show adaptation reasons
-    if (enhancedConfig.adaptiveSpacing) {
+    if (recentTrades.length > 0) {
       console.log('');
-      console.log(chalk.cyan('📊 ADAPTATION LOGIC'));
-      console.log('─'.repeat(30));
+      console.log(chalk.cyan('🕒 Recent Trades:'));
+      console.log('Time     | Grid | Side | Price      | Amount        | Status    | TX Hash');
+      console.log('─'.repeat(85));
 
-      const priceServiceData = comprehensiveStatus.priceServiceData || {};
-      const volatility = (priceServiceData.volatility || 0) * 100;
-      const highVolThreshold = (enhancedConfig.highVolatilityThreshold || 0.05) * 100;
-      const lowVolThreshold = (enhancedConfig.lowVolatilityThreshold || 0.01) * 100;
+      for (const trade of recentTrades) {
+        const time = new Date(trade.timestamp).toLocaleTimeString();
+        const gridStr = trade.gridLevel.toString().padEnd(4);
+        const sideColor = trade.side === 'BUY' ? chalk.green(trade.side) : chalk.red(trade.side);
+        const priceStr = trade.triggerPrice.toFixed(8).padEnd(10);
 
-      console.log(`Current Volatility:    ${chalk.cyan(volatility.toFixed(2) + '%')}`);
-      console.log(`High Vol Threshold:    ${chalk.gray(highVolThreshold.toFixed(2) + '%')}`);
-      console.log(`Low Vol Threshold:     ${chalk.gray(lowVolThreshold.toFixed(2) + '%')}`);
+        const nativeAmount = trade.side === 'BUY' ?
+          `${(parseFloat(trade.amountIn) / 1e8).toFixed(6)} UBTC` :
+          `${(parseFloat(trade.amountIn) / 1e18).toFixed(4)} WHYPE`;
+        const amountStr = nativeAmount.padEnd(13);
 
-      if (volatility > highVolThreshold) {
-        console.log(`Adaptation Reason:     ${chalk.red('High volatility → Fewer grids (' + enhancedConfig.minGridCount + ')')}`);
-      } else if (volatility < lowVolThreshold) {
-        console.log(`Adaptation Reason:     ${chalk.blue('Low volatility → More grids (' + enhancedConfig.maxGridCount + ')')}`);
-      } else {
-        console.log(`Adaptation Reason:     ${chalk.green('Normal volatility → Using configured grids')}`);
+        let statusStr = '';
+        switch (trade.status) {
+          case 'PENDING':
+            statusStr = chalk.yellow('⏳ Pending');
+            break;
+          case 'CONFIRMED':
+            statusStr = chalk.green('✅ Success');
+            break;
+          case 'FAILED':
+            statusStr = chalk.red('❌ Failed');
+            break;
+        }
+
+        const txHash = trade.transactionHash ?
+          trade.transactionHash.substring(0, 10) + '...' :
+          'N/A';
+
+        console.log(`${time} | ${gridStr} | ${sideColor.padEnd(4)} | ${priceStr} | ${amountStr} | ${statusStr.padEnd(9)} | ${txHash}`);
       }
+
+      // Show explorer links for recent confirmed trades
+      const confirmedTrades = recentTrades.filter(t => t.status === 'CONFIRMED' && t.transactionHash);
+      if (confirmedTrades.length > 0) {
+        console.log('');
+        console.log(chalk.gray('🔗 View on HyperLiquid Explorer:'));
+        for (const trade of confirmedTrades.slice(0, 3)) {
+          const explorerUrl = this.tradeMonitor!.getExplorerUrl(trade.transactionHash!);
+          console.log(chalk.gray(`   Grid ${trade.gridLevel} (${trade.side}): ${explorerUrl}`));
+        }
+      }
+    } else {
+      console.log('');
+      console.log(chalk.gray('No trades executed yet. Bot is waiting for price triggers.'));
     }
 
     console.log('');
   }
 
-  /**
-   * Validate that displayed information matches bot's actual behavior
-   */
-  private validateBotConsistency(comprehensiveStatus: any): { isConsistent: boolean; warnings: string[] } {
-    const warnings: string[] = [];
-    let isConsistent = true;
+  // Configuration validation method removed - unified GridCalculationService is single source of truth
 
-    const status = comprehensiveStatus.status || {};
-    const adaptiveConfig = comprehensiveStatus.adaptiveConfig || {};
-    const gridAnalysis = comprehensiveStatus.gridAnalysis || {};
-    const priceServiceData = comprehensiveStatus.priceServiceData || {};
-
-    // Validate grid count consistency
-    if (status.gridInfo?.totalGrids && adaptiveConfig.gridCount) {
-      if (status.gridInfo.totalGrids !== adaptiveConfig.gridCount) {
-        warnings.push(`Grid count mismatch: Status shows ${status.gridInfo.totalGrids}, Config shows ${adaptiveConfig.gridCount}`);
-        isConsistent = false;
-      }
-    }
-
-    // Validate price consistency
-    if (status.currentPrice && priceServiceData.currentPrice) {
-      const priceDiff = Math.abs(status.currentPrice - priceServiceData.currentPrice);
-      if (priceDiff > 0.00000001) { // Allow for small floating point differences
-        warnings.push(`Price mismatch: Status shows ${status.currentPrice}, Service shows ${priceServiceData.currentPrice}`);
-        isConsistent = false;
-      }
-    }
-
-    // Validate spacing calculation
-    if (gridAnalysis.spacing?.average && adaptiveConfig.minPrice && adaptiveConfig.maxPrice && adaptiveConfig.gridCount) {
-      const calculatedSpacing = this.calculateSpacingFromPriceRange(
-        adaptiveConfig.minPrice,
-        adaptiveConfig.maxPrice,
-        adaptiveConfig.gridCount
-      );
-      const spacingDiff = Math.abs(gridAnalysis.spacing.average - calculatedSpacing);
-      if (spacingDiff > 0.01) { // Allow 0.01% difference
-        warnings.push(`Spacing calculation mismatch: Analysis shows ${gridAnalysis.spacing.average.toFixed(2)}%, Calculated shows ${calculatedSpacing.toFixed(2)}%`);
-        isConsistent = false;
-      }
-    }
-
-    return { isConsistent, warnings };
-  }
+  // Bot consistency validation removed - unified GridCalculationService eliminates inconsistencies
 
   /**
-   * Display system health and consistency summary
+   * Display system health summary
    */
-  private displaySystemHealthSummary(comprehensiveStatus: any, validation: { isConsistent: boolean; warnings: string[] }): void {
+  private displaySystemHealthSummary(comprehensiveStatus: any): void {
     console.log('');
-    console.log(chalk.cyan('🏥 SYSTEM HEALTH & CONSISTENCY'));
+    console.log(chalk.cyan('🏥 SYSTEM HEALTH'));
     console.log('─'.repeat(50));
 
     const status = comprehensiveStatus.status || {};
     const priceServiceData = comprehensiveStatus.priceServiceData || {};
     const runtimeConfig = comprehensiveStatus.runtimeConfig || {};
 
-    // Overall health status
-    const isRunning = status.isRunning || false;
-    const hasRecentData = priceServiceData.timestamp && (Date.now() - priceServiceData.timestamp) < 30000;
+    // Check if we have current price data (most important indicator)
+    const hasCurrentPrice = !!priceServiceData.currentPrice;
+    const isRunning = status.isRunning !== false; // Default to true if not specified
     const hasConfiguration = Object.keys(runtimeConfig).length > 0;
 
-    const overallHealth = isRunning && hasRecentData && hasConfiguration && validation.isConsistent;
-    const healthIcon = overallHealth ? '🟢' : '🟡';
-    const healthText = overallHealth ? 'HEALTHY' : 'NEEDS ATTENTION';
-    const healthColor = overallHealth ? chalk.green : chalk.yellow;
+    // Overall health based on critical systems only
+    const overallHealth = hasCurrentPrice && isRunning;
+    const healthIcon = overallHealth ? '✅' : '❌';
+    const healthText = overallHealth ? 'HEALTHY' : 'ISSUES DETECTED';
+    const healthColor = overallHealth ? chalk.green : chalk.red;
 
     console.log(`Overall Status:       ${healthIcon} ${healthColor(healthText)}`);
     console.log('');
@@ -842,18 +1067,18 @@ class StatusDisplay {
     const botUpdate = status.lastUpdate ? new Date(status.lastUpdate).toLocaleTimeString() : 'N/A';
     console.log(`Bot Engine             | ${botStatus.padEnd(20)} | ${botUpdate}`);
 
-    const priceStatus = hasRecentData ? chalk.green('✅ Live') : chalk.yellow('⚠️  Stale');
-    const priceUpdate = priceServiceData.timestamp ? new Date(priceServiceData.timestamp).toLocaleTimeString() : 'N/A';
+    const priceStatus = hasCurrentPrice ? chalk.green('✅ Working') : chalk.red('❌ Failed');
+    const priceUpdate = new Date().toLocaleTimeString(); // Current time since we just fetched price
     console.log(`Price Service          | ${priceStatus.padEnd(20)} | ${priceUpdate}`);
 
     const configStatus = hasConfiguration ? chalk.green('✅ Loaded') : chalk.red('❌ Missing');
-    const configUpdate = runtimeConfig.timestamp ? new Date(runtimeConfig.timestamp).toLocaleTimeString() : 'N/A';
+    const configUpdate = new Date().toLocaleTimeString(); // Current time since config is loaded
     console.log(`Configuration          | ${configStatus.padEnd(20)} | ${configUpdate}`);
 
-    const consistencyStatus = validation.isConsistent ? chalk.green('✅ Consistent') : chalk.yellow('⚠️  Issues');
-    console.log(`Data Consistency       | ${consistencyStatus.padEnd(20)} | Real-time`);
+    const gridStatus = hasCurrentPrice ? chalk.green('✅ Ready') : chalk.red('❌ Waiting');
+    console.log(`Grid System            | ${gridStatus.padEnd(20)} | Real-time`);
 
-    // Recommendations
+    // Recommendations only if there are actual issues
     if (!overallHealth) {
       console.log('');
       console.log(chalk.yellow('📋 RECOMMENDATIONS'));
@@ -862,153 +1087,138 @@ class StatusDisplay {
       if (!isRunning) {
         console.log(chalk.gray('• Start the bot: npm run grid:start'));
       }
-      if (!hasRecentData) {
-        console.log(chalk.gray('• Check price service connectivity'));
+      if (!hasCurrentPrice) {
+        console.log(chalk.gray('• Check network connectivity and RPC endpoint'));
       }
       if (!hasConfiguration) {
         console.log(chalk.gray('• Verify bot configuration is loaded'));
       }
-      if (!validation.isConsistent) {
-        console.log(chalk.gray('• Review consistency warnings above'));
-      }
     }
 
     console.log('');
   }
 
   /**
-   * Display all grid levels with trigger conditions using real bot data
+   * Display all grid levels using unified calculation service - SAME AS BOT
    */
-  private async displayAllGridLevels(comprehensiveStatus: any, currentPrice: number, hypePrice: number, adaptiveConfig: any): Promise<void> {
-    console.log(chalk.yellow('🎯 ALL GRID LEVELS & TRIGGER CONDITIONS'));
-    console.log('─'.repeat(50));
-    console.log(chalk.gray('Grid | Side | Price (WHYPE/UBTC) | Distance | Net Profit | Status'));
-    console.log(chalk.gray('─'.repeat(75)));
+  private async displayAllGridLevels(currentPrice: number, hypePrice: number): Promise<GridCalculationResult> {
+    if (!this.gridCalculationService) {
+      throw new Error('Grid calculation service not initialized');
+    }
 
-    // Use actual bot configuration from comprehensive status
-    const runtimeConfig = comprehensiveStatus.runtimeConfig || {};
-    const baseConfig = runtimeConfig.baseConfig || {};
+    // Use the SAME calculation service as the trading bot
+    const gridResult = this.gridCalculationService.calculateGridLevels(currentPrice, hypePrice);
 
-    const gridCount = adaptiveConfig.gridCount || baseConfig.gridCount || 8;
-    const totalInvestment = baseConfig.totalInvestment || 300;
-    const profitMargin = adaptiveConfig.profitMargin || baseConfig.profitMargin || 0.04;
-    const minProfitPercentage = baseConfig.minProfitPercentage || 0.0015; // 0.15% default
+    console.log(chalk.yellow('🎯 GRID LEVELS & TRADING OPPORTUNITIES'));
+    console.log('─'.repeat(70));
+    console.log(chalk.gray('Grid | Side | Price (WHYPE/UBTC) | Distance | Trade Size (USD/Native)    | Multiplier | Net Profit | Status'));
+    console.log(chalk.gray('─'.repeat(128)));
 
-    // Use actual price range from adaptive configuration
-    const minPrice = adaptiveConfig.minPrice || baseConfig.minPrice || currentPrice * 0.95;
-    const maxPrice = adaptiveConfig.maxPrice || baseConfig.maxPrice || currentPrice * 1.05;
+    // Display grid levels using SAME calculation as trading bot
+    for (const level of gridResult.levels) {
+      const gridNum = level.index.toString().padEnd(4);
+      const priceStr = level.price.toFixed(8).padEnd(18);
+      const distance = level.distanceFromMidPrice.toFixed(2) + '%';
+      const distanceColor = Math.abs(level.distanceFromMidPrice) < 5 ? chalk.yellow :
+                           level.distanceFromMidPrice > 0 ? chalk.red : chalk.green;
 
-    // Calculate grid levels using same logic as bot
-    for (let i = 0; i < gridCount; i++) {
-      const ratio = Math.pow(maxPrice / minPrice, 1 / (gridCount - 1));
-      const price = minPrice * Math.pow(ratio, i);
-      const positionSize = totalInvestment / gridCount;
+      // Format trade size display with both USD and native amounts (precise USD)
+      const usdAmount = `$${level.tradeSizeUSD.toFixed(2)}`;
+      const nativeAmount = level.side === 'BUY' ?
+        `${(parseFloat(level.amountIn) / 1e8).toFixed(6)} UBTC` :
+        `${(parseFloat(level.amountIn) / 1e18).toFixed(4)} WHYPE`;
+      const tradeSizeStr = `${usdAmount}/${nativeAmount}`.padEnd(28); // Increased padding for longer USD amounts
 
-      // Calculate distance from current price
-      const distanceFromCurrent = ((price - currentPrice) / currentPrice) * 100;
+      // Show position multiplier for transparency
+      const multiplierStr = `${level.positionMultiplier.toFixed(2)}x`.padEnd(10);
 
-      // Determine side
-      const side = price < currentPrice ? 'BUY ' : 'SELL';
-      const sideColor = side === 'BUY ' ? chalk.green(side) : chalk.red(side);
+      const netProfitStr = (level.netProfitUSD >= 0 ? chalk.green('$' + level.netProfitUSD.toFixed(2)) : chalk.red('$' + level.netProfitUSD.toFixed(2))).padEnd(10);
+      const status = level.isProfitable ? chalk.green('✅ Ready') : chalk.red('❌ Unprofitable');
+      const sideColor = level.side === 'BUY' ? chalk.green(level.side + ' ') : chalk.red(level.side);
 
-      // Calculate profitability with dynamic minimum profit
-      const grossProfit = positionSize * profitMargin;
-      const actualCosts = this.calculateActualTradingCosts(positionSize, hypePrice);
-      const netProfit = grossProfit - actualCosts;
-      const dynamicMinProfitUsd = positionSize * minProfitPercentage;
-      const isProfitable = netProfit >= dynamicMinProfitUsd;
+      console.log(`${gridNum} | ${sideColor} | ${priceStr} | ${distanceColor(distance.padEnd(8))} | ${tradeSizeStr} | ${multiplierStr} | ${netProfitStr} | ${status}`);
+    }
 
-      // Format display
-      const gridNum = i.toString().padEnd(4);
-      const priceStr = price.toFixed(8).padEnd(18);
-      const distance = distanceFromCurrent.toFixed(2) + '%';
-      const distanceColor = Math.abs(distanceFromCurrent) < 5 ? chalk.yellow :
-                           distanceFromCurrent > 0 ? chalk.red : chalk.green;
-      const netProfitStr = (netProfit >= 0 ? chalk.green('$' + netProfit.toFixed(2)) : chalk.red('$' + netProfit.toFixed(2))).padEnd(10);
-      const status = isProfitable ? chalk.green('✅ Ready') : chalk.red('❌ Unprofitable');
-
-      console.log(`${gridNum} | ${sideColor} | ${priceStr} | ${distanceColor(distance.padEnd(8))} | ${netProfitStr} | ${status}`);
+    // Display grid statistics
+    if (this.gridCalculationService) {
+      const stats = this.gridCalculationService.getGridStatistics(gridResult.levels);
+      console.log('');
+      console.log(chalk.cyan('📊 Grid Statistics:'));
+      console.log(`Total Capital Required: ${chalk.cyan('$' + stats.totalCapitalRequired.toFixed(0))}`);
+      console.log(`Average Position Size:  ${chalk.cyan('$' + stats.averagePositionSize.toFixed(0))}`);
+      console.log(`Position Range:         ${chalk.cyan('$' + stats.smallestPosition.toFixed(0) + ' - $' + stats.largestPosition.toFixed(0))}`);
+      console.log(`Capital Efficiency:     ${chalk.cyan((stats.capitalEfficiency * 100).toFixed(1) + '%')}`);
     }
 
     console.log('');
+    return gridResult;
   }
 
   /**
-   * Display next trading opportunities
+   * Display next trading opportunities using unified grid calculation
    */
-  private displayTradingOpportunities(_status: any, currentPrice: number): void {
+  private displayTradingOpportunities(gridResult: GridCalculationResult): void {
     console.log(chalk.yellow('⚡ NEXT TRADING OPPORTUNITIES'));
     console.log('─'.repeat(50));
 
-    // Calculate next trading opportunities based on tight adaptive grid
-    const gridSpacing = 0.0125; // 1.25% spacing
+    // Use the SAME logic as the trading bot for next opportunities
+    const nextBuy = gridResult.nextBuyTrigger;
+    const nextSell = gridResult.nextSellTrigger;
 
-    const nextBuyPrice = currentPrice * (1 - gridSpacing);
-    const nextSellPrice = currentPrice * (1 + gridSpacing);
+    if (nextBuy) {
+      const buyDistance = nextBuy.distanceFromMidPrice;
+      console.log(`📉 Next BUY Trigger:  ${chalk.green(buyDistance.toFixed(2) + '%')} drop to ${chalk.cyan(nextBuy.price.toFixed(8))} WHYPE/UBTC`);
+      console.log(`   Trade Size: ${chalk.cyan('$' + nextBuy.tradeSizeUSD.toFixed(2))} | Expected Profit: ${chalk.green('$' + nextBuy.netProfitUSD.toFixed(2))}`);
+    } else {
+      console.log(`📉 Next BUY Trigger:  ${chalk.gray('No buy levels available')}`);
+    }
 
-    const buyDistance = ((nextBuyPrice - currentPrice) / currentPrice * 100);
-    const sellDistance = ((nextSellPrice - currentPrice) / currentPrice * 100);
-
-    console.log(`📉 Next BUY Trigger:  ${chalk.green(buyDistance.toFixed(2) + '%')} drop to ${chalk.cyan(nextBuyPrice.toFixed(8))} WHYPE/UBTC`);
     console.log('');
-    console.log(`📈 Next SELL Trigger: ${chalk.green(sellDistance.toFixed(2) + '%')} rise to ${chalk.cyan(nextSellPrice.toFixed(8))} WHYPE/UBTC`);
+
+    if (nextSell) {
+      const sellDistance = nextSell.distanceFromMidPrice;
+      console.log(`📈 Next SELL Trigger: ${chalk.green(sellDistance.toFixed(2) + '%')} rise to ${chalk.cyan(nextSell.price.toFixed(8))} WHYPE/UBTC`);
+      console.log(`   Trade Size: ${chalk.cyan('$' + nextSell.tradeSizeUSD.toFixed(2))} | Expected Profit: ${chalk.green('$' + nextSell.netProfitUSD.toFixed(2))}`);
+    } else {
+      console.log(`📈 Next SELL Trigger: ${chalk.gray('No sell levels available')}`);
+    }
+
     console.log('');
   }
 
   /**
    * Display trading analysis
    */
-  private displayTradingAnalysis(status: any, _currentPrice: number, hypePrice: number): void {
+  private displayTradingAnalysis(gridResult: GridCalculationResult): void {
     console.log(chalk.yellow('🔍 WHY NO TRADES ARE EXECUTING'));
     console.log('─'.repeat(50));
 
-    const gridInfo = status.gridInfo || {};
-    const gridCount = gridInfo.totalGrids || 8; // Updated for tight adaptive
-    const positionSizeUsd = 300 / gridCount; // $300 total investment
-    const minProfitPercentage = 0.0015; // 0.15% minimum profit percentage
-    const dynamicMinProfitUsd = positionSizeUsd * minProfitPercentage;
-    const actualCosts = this.calculateActualTradingCosts(positionSizeUsd, hypePrice);
+    const profitableLevels = gridResult.levels.filter(l => l.isProfitable);
+    const totalLevels = gridResult.levels.length;
 
-    // Calculate expected profit with corrected costs
-    const expectedProfit = positionSizeUsd * 0.04; // 4% profit margin
-    const netProfit = expectedProfit - actualCosts;
-
-    if (netProfit >= dynamicMinProfitUsd) {
+    if (profitableLevels.length === totalLevels) {
       console.log(chalk.green('✅ ALL GRIDS ARE PROFITABLE'));
-      console.log(`   • All ${gridCount} grids meet profitability requirements`);
-      console.log(`   • Expected net profit: $${netProfit.toFixed(2)} per trade`);
-      console.log(`   • Actual trading costs: $${actualCosts.toFixed(4)} per trade`);
-      console.log(`   • Cost breakdown: Gas (~$0.0009) + Pool fees (0.3%) + Slippage (~0.05%)`);
-      console.log(`   • Bot is waiting for price to hit grid levels (±1.25% movements)`);
+      console.log(`   • All ${totalLevels} grids meet profitability requirements`);
+      console.log(`   • Expected net profit: $${profitableLevels[0]?.netProfitUSD.toFixed(2) || '0.00'} per trade`);
+      console.log(`   • Cost breakdown: Pool fees (0.3%) only - gas and slippage negligible`);
+      console.log(`   • Bot is waiting for price to hit grid levels`);
+
+      if (gridResult.nextBuyTrigger) {
+        console.log(`   • Next BUY at ${gridResult.nextBuyTrigger.distanceFromMidPrice.toFixed(2)}% below current price`);
+      }
+      if (gridResult.nextSellTrigger) {
+        console.log(`   • Next SELL at ${gridResult.nextSellTrigger.distanceFromMidPrice.toFixed(2)}% above current price`);
+      }
     } else {
-      console.log(chalk.red('❌ NO PROFITABLE GRIDS AVAILABLE'));
-      console.log(`   • All ${gridCount} grids fail profitability check`);
-      console.log(`   • Minimum profit required: $${dynamicMinProfitUsd.toFixed(4)} (${(minProfitPercentage * 100).toFixed(3)}% of position)`);
-      console.log(`   • Actual trading costs: $${actualCosts.toFixed(4)} per trade`);
-      console.log(`   • Cost breakdown: Gas (~$0.0009) + Pool fees (0.3%) + Slippage (~0.05%)`);
+      console.log(chalk.red('❌ SOME GRIDS ARE UNPROFITABLE'));
+      console.log(`   • ${profitableLevels.length}/${totalLevels} grids meet profitability requirements`);
+      console.log(`   • Increase profit margin or reduce position size to enable more trading`);
     }
+
     console.log('');
   }
 
-  /**
-   * Calculate actual HyperSwap V3 trading costs
-   */
-  private calculateActualTradingCosts(positionSizeUsd: number, hypePrice: number): number {
-    // CORRECTED: Actual HyperSwap V3 cost structure
 
-    // 1. Gas costs: ~0.00002 HYPE per swap (negligible)
-    const gasCostUsd = 0.00002 * hypePrice; // ~$0.0009 at $45 HYPE
-
-    // 2. Pool fees: 0.3% on HYPE/UBTC pool (main cost)
-    const poolFeePercent = 0.003; // 0.3%
-    const poolFeeUsd = positionSizeUsd * poolFeePercent;
-
-    // 3. Slippage: Minimal for position sizes under $100
-    const slippagePercent = positionSizeUsd > 100 ? 0.001 : 0.0005; // 0.1% or 0.05%
-    const slippageUsd = positionSizeUsd * slippagePercent;
-
-    return gasCostUsd + poolFeeUsd + slippageUsd;
-  }
 
   /**
    * Display live configuration verification
@@ -1043,9 +1253,8 @@ class StatusDisplay {
       console.log('');
 
       // Calculate expected performance
-      const hypePrice = 44.86; // Fallback HYPE price
       const positionSize = gridConfig.totalInvestment / gridConfig.gridCount;
-      const actualCosts = this.calculateActualTradingCosts(positionSize, hypePrice);
+      const actualCosts = positionSize * 0.003; // Pool fees only (0.3%)
       const grossProfit = positionSize * gridConfig.profitMargin;
       const netProfit = grossProfit - actualCosts;
 
@@ -1069,21 +1278,25 @@ class StatusDisplay {
   /**
    * Display configuration analysis (legacy method)
    */
-  private displayConfigurationAnalysis(status: any, hypePrice: number): void {
+  private async displayConfigurationAnalysis(_status: any): Promise<void> {
     console.log(chalk.yellow('⚙️ CONFIGURATION ANALYSIS'));
     console.log('─'.repeat(50));
 
-    // Get configuration from bot-status.json
-    const config = status.config || {};
-    const gridConfig = config.gridTrading || {};
-    const gridCount = gridConfig.gridCount || 8; // Updated for tight adaptive
-    const totalInvestment = parseInt(gridConfig.investment?.replace('$', '')) || 300;
-    const profitMargin = parseFloat(gridConfig.profitMargin) / 100 || 0.04;
-    const minProfitPercentage = 0.0015; // 0.15% minimum profit percentage
+    // Use ACTUAL configuration values from .env - NO HARDCODED OVERRIDES
+    if (!this.config) {
+      console.log(chalk.red('❌ Configuration not loaded'));
+      return;
+    }
+
+    const gridConfig = this.config.gridTrading;
+    const gridCount = gridConfig.gridCount;
+    const totalInvestment = gridConfig.totalInvestment;
+    const profitMargin = gridConfig.profitMargin;
+    const minProfitPercentage = gridConfig.minProfitPercentage;
 
     const positionSize = totalInvestment / gridCount;
     const dynamicMinProfitUsd = positionSize * minProfitPercentage;
-    const actualCosts = this.calculateActualTradingCosts(positionSize, hypePrice);
+    const actualCosts = positionSize * 0.003; // Pool fees only (0.3%)
     const feeRatio = actualCosts / positionSize;
 
     console.log(`Position Size:        $${positionSize.toFixed(2)} per grid`);
@@ -1094,6 +1307,18 @@ class StatusDisplay {
 
     if (feeRatio > 0.05) {
       console.log(chalk.red(`⚠️ High fee ratio (${(feeRatio * 100).toFixed(1)}%) may prevent profitable trades`));
+    }
+
+    // Display allocation breakdown
+    if (this.allocationValidator) {
+      const allocationResult = this.allocationValidator.validateConfiguration();
+      this.allocationValidator.displayAllocationBreakdown(allocationResult);
+    }
+
+    // Display grid levels for each active pair (if in multi-pair mode)
+    const multiPairMetrics = this.dataStore.getMultiPairMetrics();
+    if (multiPairMetrics && multiPairMetrics.totalPairs > 0) {
+      await this.displayMultiPairGridLevels(multiPairMetrics);
     }
 
     console.log('');

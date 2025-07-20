@@ -48,6 +48,7 @@ export interface GridTradingConfig {
   mode: 'geometric' | 'arithmetic';
   totalInvestment: number;
   profitMargin: number;
+  scalingFactor?: number;  // Geometric scaling intensity (1-20, default 5)
   slippageTolerance: number;
   maxDailyLoss: number;
   stopLossEnabled: boolean;
@@ -72,6 +73,15 @@ export interface GridTradingConfig {
 
   // NEW: Multi-pair trading support
   multiPair?: MultiPairGridConfig;  // Multi-pair configuration (optional)
+
+  // NEW: Default price configuration for fallbacks
+  fallbackPrice?: number;  // Fallback price for WHYPE/UBTC pair
+}
+
+export interface DefaultPricesConfig {
+  hypeUsd?: number;  // Default HYPE/USD price
+  btcUsd?: number;   // Default BTC/USD price
+  ethUsd?: number;   // Default ETH/USD price
 }
 
 export interface WebSocketConfig {

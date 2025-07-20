@@ -45,7 +45,7 @@ class MultiPairPricingTest {
     await this.onChainService.initializeContracts();
 
     const webSocketService = new HyperLiquidWebSocketService();
-    this.hybridService = new HybridPricingService(this.onChainService, webSocketService);
+    this.hybridService = new HybridPricingService(this.onChainService, webSocketService, this.config);
 
     console.log('✅ Services initialized successfully\n');
   }

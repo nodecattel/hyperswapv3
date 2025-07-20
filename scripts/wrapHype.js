@@ -15,7 +15,7 @@ async function wrapHype() {
     const provider = new ethers.providers.JsonRpcProvider(process.env.RPC_URL);
     const signer = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
     
-    const whypeAddress = '0x5555555555555555555555555555555555555555';
+    const whypeAddress = process.env.WHYPE_ADDRESS || '0x5555555555555555555555555555555555555555';
     
     // WHYPE contract ABI (standard WETH-like interface)
     const WHYPE_ABI = [
@@ -46,8 +46,9 @@ async function wrapHype() {
       return;
     }
     
-    // Wrap a reasonable amount for trading (e.g., 5 HYPE)
-    const wrapAmount = ethers.utils.parseEther('5.0');
+    // Wrap amount from environment or default to 5 HYPE
+    const defaultWrapAmount = process.env.DEFAULT_WRAP_AMOUNT || '5.0';
+    const wrapAmount = ethers.utils.parseEther(defaultWrapAmount);
     const actualWrapAmount = availableToWrap.lt(wrapAmount) ? availableToWrap : wrapAmount;
     
     console.log(`\n🔄 Wrapping ${ethers.utils.formatEther(actualWrapAmount)} HYPE to WHYPE...`);
@@ -120,7 +121,7 @@ function showManualWrapInstructions() {
   console.log('If the automatic wrapping fails, you can wrap HYPE manually:');
   console.log('');
   console.log('1. Go to HyperEVM Explorer: https://hyperevmscan.io');
-  console.log('2. Navigate to WHYPE contract: 0x5555555555555555555555555555555555555555');
+  console.log(`2. Navigate to WHYPE contract: ${process.env.WHYPE_ADDRESS || '0x5555555555555555555555555555555555555555'}`);
   console.log('3. Use the "Write Contract" tab');
   console.log('4. Connect your wallet');
   console.log('5. Call the "deposit" function with the amount of HYPE to wrap');

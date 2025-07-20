@@ -3,6 +3,7 @@ import * as winston from 'winston';
 import { PriceQuote } from '../types';
 import OnChainPriceService from './onChainPriceService';
 import HyperLiquidWebSocketService from './hyperliquidWebSocketService';
+import GridTradingConfig from '../config/gridTradingConfig';
 
 interface PriceConversionRates {
   btcUsd: number;
@@ -24,14 +25,17 @@ class HybridPricingService {
   private webSocketService: HyperLiquidWebSocketService;
   private conversionRates: PriceConversionRates | null = null;
   private cacheExpiryMs: number = 30000; // 30 seconds
+  private config: GridTradingConfig;
 
   constructor(
     onChainService: OnChainPriceService,
     webSocketService: HyperLiquidWebSocketService,
+    config: GridTradingConfig,
     logger?: winston.Logger
   ) {
     this.onChainService = onChainService;
     this.webSocketService = webSocketService;
+    this.config = config;
     
     this.logger = logger || winston.createLogger({
       level: 'info',
@@ -79,7 +83,10 @@ class HybridPricingService {
 
       // 4. Fallback to reasonable estimate
       this.logger.warn('All price sources failed, using fallback estimate');
-      return 0.0004; // Reasonable fallback
+      // Calculate fallback price from configuration if available
+      const fallbackPrice = this.config?.gridTrading?.fallbackPrice || 0.0004;
+      this.logger.warn(`Using fallback price: ${fallbackPrice}`);
+      return fallbackPrice;
 
     } catch (error) {
       this.logger.error('Failed to get WHYPE/UBTC price:', error);
@@ -206,10 +213,12 @@ class HybridPricingService {
       }
 
       // In production, this would fetch from a reliable price API
-      // For now, use reasonable estimates
+      // Get prices from configuration or use reasonable defaults
+      const defaultPrices = this.config?.defaultPrices || {};
+
       this.conversionRates = {
-        btcUsd: 118000, // ~$118k BTC
-        hypeUsd: 47.2,  // ~$47.2 HYPE (example)
+        btcUsd: defaultPrices.btcUsd || 118000, // ~$118k BTC (configurable)
+        hypeUsd: defaultPrices.hypeUsd || 47.2,  // ~$47.2 HYPE (configurable)
         lastUpdate: Date.now()
       };
 
@@ -261,7 +270,7 @@ class HybridPricingService {
   /**
    * Get current price for a specific trading pair
    */
-  public async getCurrentPairPrice(baseToken: string, quoteToken: string): Promise<{ price: number; source: string } | null> {
+  public async getCurrentPairPrice(baseToken: string, quoteToken: string, forceFresh: boolean = false): Promise<{ price: number; source: string } | null> {
     try {
       // For WHYPE/UBTC, use the existing hybrid pricing logic
       if (baseToken === 'WHYPE' && quoteToken === 'UBTC') {
@@ -274,12 +283,12 @@ class HybridPricingService {
         }
       }
 
-      // For all other pairs, use direct on-chain pricing
-      const price = await this.onChainService.getPairPrice(baseToken, quoteToken);
+      // For all other pairs, use direct on-chain pricing (with forceFresh for active trading)
+      const price = await this.onChainService.getPairPrice(baseToken, quoteToken, forceFresh);
       if (price) {
         return {
           price,
-          source: 'ON_CHAIN_DIRECT'
+          source: forceFresh ? 'ON_CHAIN_FRESH' : 'ON_CHAIN_DIRECT'
         };
       }
 

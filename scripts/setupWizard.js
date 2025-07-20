@@ -47,11 +47,14 @@ class SetupWizard {
       
       // Step 5: Risk parameters
       await this.configureRiskParameters();
-      
-      // Step 6: Calculate funding requirements
+
+      // Step 6: Select funding mode
+      await this.selectFundingMode();
+
+      // Step 7: Calculate funding requirements or allocation
       await this.calculateFunding();
-      
-      // Step 7: Validate balances
+
+      // Step 8: Validate balances
       await this.validateBalances();
       
       // Step 8: Final configuration review
@@ -304,11 +307,76 @@ class SetupWizard {
   }
 
   /**
-   * Calculate funding requirements
+   * Select funding calculation mode
+   */
+  async selectFundingMode() {
+    console.log('\n💰 Funding Calculation Mode');
+    console.log('─'.repeat(40));
+    console.log('Choose how you want to calculate your funding requirements:');
+    console.log('');
+    console.log('1. Calculate minimum requirements (recommended for beginners)');
+    console.log('   → System calculates the minimum funding needed for your trading parameters');
+    console.log('');
+    console.log('2. Allocate fixed budget (for traders with a set budget)');
+    console.log('   → You specify your total budget and get optimal token allocation');
+    console.log('');
+
+    let mode;
+    while (true) {
+      const input = await this.askQuestion('Select funding mode (1 or 2): ');
+      const num = parseInt(input.trim());
+      if (num === 1 || num === 2) {
+        mode = input.trim();
+        break;
+      } else {
+        console.log('❌ Please enter 1 or 2');
+      }
+    }
+
+    if (mode === '1') {
+      this.config.FUNDING_MODE = 'minimum_requirements';
+      console.log('✅ Minimum requirements mode selected');
+    } else {
+      this.config.FUNDING_MODE = 'fixed_budget';
+      console.log('✅ Fixed budget allocation mode selected');
+
+      // Get budget amount
+      console.log('\n💵 Budget Configuration');
+      console.log('─'.repeat(25));
+      console.log('Enter your total available budget in USD (e.g., 1000, 5000, 10000):');
+
+      let budgetInput;
+      while (true) {
+        const input = await this.askQuestion('Total budget ($): ');
+        const amount = parseFloat(input.replace(/[$,]/g, ''));
+        if (!isNaN(amount) && amount > 0 && amount >= 100) {
+          budgetInput = input;
+          break;
+        } else {
+          console.log('❌ Please enter a valid amount of at least $100');
+        }
+      }
+
+      const budgetAmount = parseFloat(budgetInput.replace(/[$,]/g, ''));
+      this.config.TOTAL_BUDGET_USD = budgetAmount;
+
+      console.log(`✅ Budget set to $${budgetAmount.toLocaleString()}`);
+    }
+  }
+
+  /**
+   * Calculate funding requirements or allocation
    */
   async calculateFunding() {
-    console.log('\n💰 Calculating Funding Requirements');
-    console.log('─'.repeat(40));
+    const isFixedBudget = this.config.FUNDING_MODE === 'fixed_budget';
+
+    if (isFixedBudget) {
+      console.log('\n💰 Calculating Optimal Token Allocation');
+      console.log('─'.repeat(45));
+    } else {
+      console.log('\n💰 Calculating Funding Requirements');
+      console.log('─'.repeat(40));
+    }
 
     try {
       // Create temporary config to calculate funding
@@ -346,23 +414,53 @@ class SetupWizard {
       tempConfig.tradingPairs['USDHL/USDT0'].enabled = this.config.ENABLE_USDHL_USDT0 === 'true';
       tempConfig.tradingPairs['HYPE/UETH'].enabled = this.config.ENABLE_HYPE_UETH === 'true';
 
-      console.log('🔧 Creating funding calculator with HyperLiquid API...');
+      console.log('🔧 Creating funding calculator with hybrid pricing system...');
       this.fundingCalculator = new FundingCalculator(tempConfig, this.provider);
 
-      console.log('📊 Calculating requirements with real-time prices...');
-      const requirements = await this.fundingCalculator.calculateMinimumFunding();
+      if (isFixedBudget) {
+        // Fixed budget allocation mode
+        const budgetAmount = parseFloat(this.config.TOTAL_BUDGET_USD);
+        console.log(`📊 Calculating optimal allocation for $${budgetAmount.toLocaleString()} budget...`);
 
-      console.log('\n📋 Funding Requirements Summary:');
-      console.log(`Total USD Required: $${requirements.totalUsd.toFixed(2)}`);
-      console.log('\nToken Requirements:');
+        const allocation = await this.fundingCalculator.calculateOptimalAllocation(budgetAmount);
 
-      for (const [symbol, req] of Object.entries(requirements.tokens)) {
-        console.log(`  ${symbol}: ${req.amount.toFixed(6)} ($${req.usdValue.toFixed(2)})`);
+        console.log('\n📋 Optimal Token Allocation:');
+        console.log(`Total Budget: $${allocation.totalBudget.toLocaleString()}`);
+        console.log('\nToken Allocation:');
+
+        for (const [symbol, tokenData] of Object.entries(allocation.tokens)) {
+          console.log(`  ${symbol}: ${tokenData.amount.toFixed(6)} ($${tokenData.usdValue.toFixed(2)}, ${tokenData.percentage.toFixed(1)}%)`);
+        }
+
+        console.log(`\nGas Reserve: ${allocation.gasReserve.hype.toFixed(6)} HYPE ($${allocation.gasReserve.usd.toFixed(2)}, ${allocation.gasReserve.percentage.toFixed(1)}%)`);
+
+        // Display recommendations
+        if (allocation.recommendations.length > 0) {
+          console.log('\n💡 Recommendations:');
+          for (const rec of allocation.recommendations) {
+            console.log(`  • ${rec.title}: ${rec.description}`);
+          }
+        }
+
+        this.config.fundingAllocation = allocation;
+
+      } else {
+        // Minimum requirements mode
+        console.log('📊 Calculating requirements with real-time prices...');
+        const requirements = await this.fundingCalculator.calculateMinimumFunding();
+
+        console.log('\n📋 Funding Requirements Summary:');
+        console.log(`Total USD Required: $${requirements.totalUsd.toFixed(2)}`);
+        console.log('\nToken Requirements:');
+
+        for (const [symbol, req] of Object.entries(requirements.tokens)) {
+          console.log(`  ${symbol}: ${req.amount.toFixed(6)} ($${req.usdValue.toFixed(2)})`);
+        }
+
+        console.log(`\nGas Reserve: ${requirements.gasReserveHype.toFixed(6)} HYPE ($${requirements.gasReserveUsd.toFixed(2)})`);
+
+        this.config.fundingRequirements = requirements;
       }
-
-      console.log(`\nGas Reserve: ${requirements.gasReserveHype.toFixed(6)} HYPE ($${requirements.gasReserveUsd.toFixed(2)})`);
-
-      this.config.fundingRequirements = requirements;
 
     } catch (error) {
       console.error('❌ Funding calculation failed:', error.message);
@@ -406,35 +504,75 @@ class SetupWizard {
         return;
       }
 
-      const validation = await this.fundingCalculator.validateBalances(this.provider, this.config.walletAddress);
-      
-      console.log(`Wallet Address: ${this.config.walletAddress}`);
-      console.log('\nCurrent Balances:');
-      
-      for (const [symbol, balance] of Object.entries(validation.balances)) {
-        const required = validation.requirements.tokens[symbol]?.amount || 0;
-        const status = balance >= required ? '✅' : '❌';
-        console.log(`  ${status} ${symbol}: ${balance.toFixed(6)} (required: ${required.toFixed(6)})`);
-      }
-      
-      if (validation.isValid) {
-        console.log('\n✅ Wallet is sufficiently funded!');
+      const isFixedBudget = this.config.FUNDING_MODE === 'fixed_budget';
+
+      if (isFixedBudget) {
+        // For fixed budget mode, show current balances vs allocation targets
+        const allocation = this.config.fundingAllocation;
+        const currentBalances = await this.fundingCalculator.getCurrentBalances(this.provider, this.config.walletAddress);
+
+        console.log(`Wallet Address: ${this.config.walletAddress}`);
+        console.log('\nCurrent Balances vs Target Allocation:');
+
+        let hasAnyTokens = false;
+        for (const [symbol, balance] of Object.entries(currentBalances)) {
+          const target = allocation.tokens[symbol]?.amount || 0;
+          const status = balance >= target ? '✅' : (balance > 0 ? '⚠️' : '❌');
+          console.log(`  ${status} ${symbol}: ${balance.toFixed(6)} (target: ${target.toFixed(6)})`);
+          if (balance > 0) hasAnyTokens = true;
+        }
+
+        if (hasAnyTokens) {
+          console.log('\n💡 You have some tokens already. Consider the allocation as guidance for additional purchases.');
+        } else {
+          console.log('\n📋 Purchase the target amounts shown above to implement your allocation strategy.');
+        }
+
+        // Show purchase order
+        if (allocation.purchaseOrder && allocation.purchaseOrder.length > 0) {
+          console.log('\n🛒 Recommended Purchase Order:');
+          for (let i = 0; i < allocation.purchaseOrder.length; i++) {
+            const order = allocation.purchaseOrder[i];
+            console.log(`  ${i + 1}. ${order.token}: ${order.amount.toFixed(6)} ($${order.usdValue.toFixed(2)})`);
+            console.log(`     Method: ${order.method}`);
+            if (order.notes) {
+              console.log(`     Notes: ${order.notes}`);
+            }
+          }
+        }
+
       } else {
-        console.log('\n❌ Insufficient funding detected');
-        console.log('\nShortfalls:');
-        
-        for (const issue of validation.issues) {
-          console.log(`  • ${issue}`);
+        // Original minimum requirements validation
+        const validation = await this.fundingCalculator.validateBalances(this.provider, this.config.walletAddress);
+
+        console.log(`Wallet Address: ${this.config.walletAddress}`);
+        console.log('\nCurrent Balances:');
+
+        for (const [symbol, balance] of Object.entries(validation.balances)) {
+          const required = validation.requirements.tokens[symbol]?.amount || 0;
+          const status = balance >= required ? '✅' : '❌';
+          console.log(`  ${status} ${symbol}: ${balance.toFixed(6)} (required: ${required.toFixed(6)})`);
         }
-        
-        console.log('\nRecommendations:');
-        for (const rec of validation.recommendations) {
-          console.log(`  • ${rec}`);
-        }
-        
-        const proceed = await this.askYesNo('\nProceed with insufficient funding? (not recommended)');
-        if (!proceed) {
-          throw new Error('Setup cancelled due to insufficient funding');
+
+        if (validation.isValid) {
+          console.log('\n✅ Wallet is sufficiently funded!');
+        } else {
+          console.log('\n❌ Insufficient funding detected');
+          console.log('\nShortfalls:');
+
+          for (const issue of validation.issues) {
+            console.log(`  • ${issue}`);
+          }
+
+          console.log('\nRecommendations:');
+          for (const rec of validation.recommendations) {
+            console.log(`  • ${rec}`);
+          }
+
+          const proceed = await this.askYesNo('\nProceed with insufficient funding? (not recommended)');
+          if (!proceed) {
+            throw new Error('Setup cancelled due to insufficient funding');
+          }
         }
       }
       
@@ -474,9 +612,23 @@ class SetupWizard {
     console.log('Risk Limits:');
     console.log(`  Max Daily Loss: $${this.config.MAX_DAILY_LOSS_USD}`);
     console.log(`  Max Position Size: $${this.config.MAX_POSITION_SIZE_USD}`);
-    
-    if (this.config.fundingRequirements) {
-      console.log(`Total Funding Required: $${this.config.fundingRequirements.totalUsd.toFixed(2)}`);
+
+    // Show funding information based on mode
+    if (this.config.FUNDING_MODE === 'fixed_budget') {
+      console.log(`Funding Mode: Fixed Budget Allocation`);
+      console.log(`Total Budget: $${parseFloat(this.config.TOTAL_BUDGET_USD).toLocaleString()}`);
+
+      if (this.config.fundingAllocation) {
+        console.log('Token Allocation:');
+        for (const [symbol, tokenData] of Object.entries(this.config.fundingAllocation.tokens)) {
+          console.log(`  ${symbol}: ${tokenData.amount.toFixed(6)} ($${tokenData.usdValue.toFixed(2)}, ${tokenData.percentage.toFixed(1)}%)`);
+        }
+      }
+    } else {
+      console.log(`Funding Mode: Minimum Requirements`);
+      if (this.config.fundingRequirements) {
+        console.log(`Total Funding Required: $${this.config.fundingRequirements.totalUsd.toFixed(2)}`);
+      }
     }
     
     const confirmed = await this.askYesNo('\nConfirm this configuration? (yes/no)');

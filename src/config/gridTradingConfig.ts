@@ -108,7 +108,7 @@ class GridTradingConfig {
         abi: [] // Will be loaded dynamically
       },
       swapRouter: {
-        address: process.env['SWAP_ROUTER_ADDRESS'] || '0x51c5958FFb3e326F8d7AA945948159f1FF27e14A', // ✅ HyperSwap SwapRouter02
+        address: process.env['SWAP_ROUTER_ADDRESS'] || '0x4E2960a8cd19B467b82d26D83fAcb0fAE26b094D', // ✅ CORRECTED: HyperSwap Router V3
         abi: [] // Will be loaded dynamically
       },
       factory: {
@@ -183,7 +183,15 @@ class GridTradingConfig {
       slippageTolerance: parseFloat(process.env['GRID_SLIPPAGE_TOLERANCE'] || '0.01'),
       // Percentage-based adaptive range
       priceRangePercent: parseFloat(process.env['GRID_PRICE_RANGE_PERCENT'] || '0.05'), // ±5% from current price
-      adaptiveRange: process.env['GRID_ADAPTIVE_RANGE'] === 'true', // Enable dynamic price range calculation
+      adaptiveEnabled: process.env['ADAPTIVE_GRID_ENABLED'] === 'true', // Master switch for adaptive features
+      adaptiveRange: process.env['ADAPTIVE_RANGE_ENABLED'] === 'true', // Enable dynamic price range calculation
+      adaptiveSpacing: process.env['ADAPTIVE_SPACING_ENABLED'] === 'true', // Enable adaptive grid spacing
+
+      // Dynamic price range configuration
+      upperRangePercent: parseFloat(process.env['GRID_UPPER_RANGE_PERCENT'] || '0.05'), // +5% upper range
+      lowerRangePercent: parseFloat(process.env['GRID_LOWER_RANGE_PERCENT'] || '0.05'), // -5% lower range
+      dynamicRangeEnabled: process.env['GRID_DYNAMIC_RANGE_ENABLED'] === 'true', // Enable dynamic range calculation
+      rangeUpdateThreshold: parseFloat(process.env['GRID_RANGE_UPDATE_THRESHOLD'] || '0.03'), // 3% movement triggers range update
       maxDailyLoss: parseFloat(process.env['MAX_DAILY_LOSS_USD'] || '50'),
       stopLossEnabled: process.env['ENABLE_STOP_LOSS'] === 'true',
       stopLossPercentage: parseFloat(process.env['STOP_LOSS_PERCENTAGE'] || '0.1'),

@@ -60,7 +60,15 @@ export interface GridTradingConfig {
   poolFee: number;
   // NEW: Percentage-based adaptive range
   priceRangePercent?: number;  // ±% from current price (e.g., 0.05 for ±5%)
+  adaptiveEnabled?: boolean;   // Master switch for all adaptive features
   adaptiveRange?: boolean;     // Enable dynamic price range calculation
+  adaptiveSpacing?: boolean;   // Enable adaptive grid spacing
+
+  // Dynamic price range configuration
+  upperRangePercent?: number;  // +% upper range from current price
+  lowerRangePercent?: number;  // -% lower range from current price
+  dynamicRangeEnabled?: boolean; // Enable dynamic range calculation
+  rangeUpdateThreshold?: number; // % movement that triggers range update
 
   // NEW: Multi-pair trading support
   multiPair?: MultiPairGridConfig;  // Multi-pair configuration (optional)
@@ -370,6 +378,9 @@ export interface CLIOptions {
   save?: string;
   port?: string;
   open?: boolean;
+  status?: boolean;
+  enable?: boolean;
+  disable?: boolean;
 }
 
 export interface TestResult {

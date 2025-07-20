@@ -179,6 +179,9 @@ class StatusDisplay {
     const multiPairMetrics = this.dataStore.getMultiPairMetrics();
     const trades = this.dataStore.getTrades(10); // Last 10 trades
 
+    // Always show wallet balances first
+    await this.displayComprehensiveBalances();
+
     // Check if multi-pair mode is active
     if (multiPairMetrics && multiPairMetrics.totalPairs > 0) {
       await this.displayMultiPairStatus(multiPairMetrics, detailed);
@@ -820,7 +823,7 @@ class StatusDisplay {
 
     // Overall health status
     const isRunning = status.isRunning || false;
-    const hasRecentData = priceServiceData.lastUpdate && (Date.now() - priceServiceData.lastUpdate) < 30000;
+    const hasRecentData = priceServiceData.timestamp && (Date.now() - priceServiceData.timestamp) < 30000;
     const hasConfiguration = Object.keys(runtimeConfig).length > 0;
 
     const overallHealth = isRunning && hasRecentData && hasConfiguration && validation.isConsistent;
@@ -840,7 +843,7 @@ class StatusDisplay {
     console.log(`Bot Engine             | ${botStatus.padEnd(20)} | ${botUpdate}`);
 
     const priceStatus = hasRecentData ? chalk.green('✅ Live') : chalk.yellow('⚠️  Stale');
-    const priceUpdate = priceServiceData.lastUpdate ? new Date(priceServiceData.lastUpdate).toLocaleTimeString() : 'N/A';
+    const priceUpdate = priceServiceData.timestamp ? new Date(priceServiceData.timestamp).toLocaleTimeString() : 'N/A';
     console.log(`Price Service          | ${priceStatus.padEnd(20)} | ${priceUpdate}`);
 
     const configStatus = hasConfiguration ? chalk.green('✅ Loaded') : chalk.red('❌ Missing');

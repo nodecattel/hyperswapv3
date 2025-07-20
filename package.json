@@ -30,6 +30,7 @@
       "grid:start": "ts-node src/cli/gridCli.ts start",
       "grid:stop": "ts-node src/cli/gridCli.ts stop",
       "grid:status": "ts-node src/cli/gridCli.ts status --",
+      "grid:adaptive": "ts-node src/cli/gridCli.ts adaptive",
       "grid:watch": "ts-node src/cli/gridCli.ts status --watch",
       "grid:test": "ts-node src/cli/gridCli.ts test",
       "clean": "rm -rf dist",

@@ -88,152 +88,118 @@ class HyperSwapV3TradingService {
 
   /**
    * Execute exact input single swap
-   * Based on the exactInputSingleSwap function from v3_swap_functions.js
+   * REWRITTEN to match the working v3_swap_functions.js implementation exactly
+   *
+   * @param provider - The ethers.js provider
+   * @param signer - The ethers.js signer
+   * @param amountIn - The exact amount of the input token to swap
+   * @param recipientAddress - The address to receive the output token
+   * @param amountOutMinimum - The minimum amount of the output token expected
+   * @param tokenIn - The address of the input token
+   * @param tokenOut - The address of the output token
    */
   public async exactInputSingleSwap(
+    _provider: ethers.providers.JsonRpcProvider,
+    signer: ethers.Signer,
+    amountIn: BigNumber,
+    recipientAddress: string,
+    amountOutMinimum: BigNumber,
+    tokenIn: string,
+    tokenOut: string
+  ): Promise<ethers.ContractReceipt> {
+
+    // Use the existing initialized router contract, connected to the signer
+    if (!this.swapRouterContract) {
+      throw new Error('SwapRouter contract not initialized');
+    }
+    const router = this.swapRouterContract.connect(signer);
+
+    // ERC20 ABI - exact same as v3_swap_functions.js
+    const ERC20_ABI = [
+      "function approve(address spender, uint256 amount) public returns (bool)",
+      "function allowance(address owner, address spender) public view returns (uint256)",
+      "function balanceOf(address account) public view returns (uint256)",
+    ];
+    const tokenContract = new ethers.Contract(tokenIn, ERC20_ABI, signer);
+
+    const deadline = Math.floor(Date.now() / 1000) + 60 * 20; // 20 minutes from now
+
+    // Check tokenIn balance - exact same logic as v3_swap_functions.js
+    const signerAddress = await signer.getAddress();
+    const balance = await tokenContract['balanceOf'](signerAddress);
+    console.log(`TokenIn Balance: ${balance.toString()}`);
+
+    if (balance.lt(amountIn)) {
+      console.error(
+        `Insufficient token balance for the swap. Required: ${amountIn.toString()}, Available: ${balance.toString()}`
+      );
+      throw new Error("Insufficient token balance to proceed with the swap.");
+    }
+
+    // Check tokenIn allowance - exact same logic as v3_swap_functions.js
+    const allowance = await tokenContract['allowance'](
+      signerAddress,
+      router.address
+    );
+    console.log(`TokenIn Allowance:`, allowance.toString());
+
+    if (allowance.lt(amountIn)) {
+      console.log(`Approving TokenIn for Router...`);
+      const approveTx = await tokenContract['approve'](
+        router.address,
+        ethers.constants.MaxUint256
+      );
+      await approveTx.wait();
+      console.log(`TokenIn approved successfully.`);
+    } else {
+      console.log(`Sufficient TokenIn allowance already exists.`);
+    }
+
+    // Prepare params - EXACT same structure as v3_swap_functions.js
+    const params = {
+      tokenIn,
+      tokenOut,
+      fee: 3000, // Hardcoded to 3000 like in v3_swap_functions.js
+      recipient: recipientAddress,
+      deadline,
+      amountIn, // Pass BigNumber directly
+      amountOutMinimum, // Pass BigNumber directly
+      sqrtPriceLimitX96: 0, // Default, no limit
+    };
+
+    // Execute the swap - exact same call as v3_swap_functions.js
+    const tx = await router['exactInputSingle'](params);
+    return tx.wait();
+  }
+
+  /**
+   * Simplified swap method for backward compatibility with GridBot
+   * Maintains the same interface but uses the corrected implementation
+   */
+  public async executeSwap(
     tokenIn: string,
     tokenOut: string,
     amountIn: BigNumber,
     amountOutMinimum: BigNumber,
-    fee: number = 3000,
+    _fee: number = 3000, // Note: fee parameter is ignored, hardcoded to 3000 in implementation
     recipient?: string
-  ): Promise<ethers.ContractTransaction> {
-    try {
-      if (!this.swapRouterContract) {
-        throw new TradingError('SwapRouter contract not initialized');
-      }
+  ): Promise<ethers.ContractReceipt> {
+    const signerAddress = await this.signer.getAddress();
+    const recipientAddress = recipient || signerAddress;
 
-      const signerAddress = await this.signer.getAddress();
-      const recipientAddress = recipient || signerAddress;
-
-      this.logger.info('Executing exactInputSingle swap', {
-        tokenIn,
-        tokenOut,
-        amountIn: amountIn.toString(),
-        amountOutMinimum: amountOutMinimum.toString(),
-        fee,
-        recipient: recipientAddress
-      });
-
-      // Check token balance
-      await this.checkTokenBalance(tokenIn, amountIn);
-
-      // Ensure token approval
-      await this.ensureTokenApproval(tokenIn, amountIn);
-
-      // Prepare swap parameters
-      const deadline = Math.floor(Date.now() / 1000) + 60 * 20; // 20 minutes from now
-      
-      const params = {
-        tokenIn,
-        tokenOut,
-        fee,
-        recipient: recipientAddress,
-        deadline,
-        amountIn,
-        amountOutMinimum,
-        sqrtPriceLimitX96: 0 // No price limit
-      };
-
-      // Execute the swap
-      const tx = await this.swapRouterContract['exactInputSingle'](params);
-      
-      this.logger.info('Swap transaction submitted', {
-        txHash: tx.hash,
-        gasLimit: tx.gasLimit?.toString(),
-        gasPrice: tx.gasPrice?.toString()
-      });
-
-      return tx;
-
-    } catch (error) {
-      this.logger.error('Swap execution failed:', error);
-      throw new TradingError('Swap execution failed', { originalError: error });
-    }
+    // Call the corrected implementation that matches v3_swap_functions.js
+    return await this.exactInputSingleSwap(
+      this.provider,
+      this.signer,
+      amountIn,
+      recipientAddress,
+      amountOutMinimum,
+      tokenIn,
+      tokenOut
+    );
   }
 
-  /**
-   * Check token balance before swap
-   */
-  private async checkTokenBalance(tokenAddress: string, requiredAmount: BigNumber): Promise<void> {
-    try {
-      const signerAddress = await this.signer.getAddress();
 
-      // Handle native HYPE (ETH-like behavior)
-      if (tokenAddress === ethers.constants.AddressZero || 
-          tokenAddress === '0x0000000000000000000000000000000000000000') {
-        const balance = await this.provider.getBalance(signerAddress);
-        if (balance.lt(requiredAmount)) {
-          throw new TradingError(`Insufficient HYPE balance. Required: ${ethers.utils.formatEther(requiredAmount)}, Available: ${ethers.utils.formatEther(balance)}`);
-        }
-        return;
-      }
-
-      // Handle ERC20 tokens
-      const tokenContract = new ethers.Contract(tokenAddress, this.erc20ABI, this.provider);
-      const balance = await tokenContract['balanceOf'](signerAddress);
-      
-      if (balance.lt(requiredAmount)) {
-        const decimals = await tokenContract['decimals']();
-        const symbol = await tokenContract['symbol']();
-        throw new TradingError(`Insufficient ${symbol} balance. Required: ${ethers.utils.formatUnits(requiredAmount, decimals)}, Available: ${ethers.utils.formatUnits(balance, decimals)}`);
-      }
-
-      this.logger.debug('Token balance check passed', {
-        token: tokenAddress,
-        required: requiredAmount.toString(),
-        available: balance.toString()
-      });
-
-    } catch (error) {
-      if (error instanceof TradingError) {
-        throw error;
-      }
-      throw new TradingError('Balance check failed', { originalError: error });
-    }
-  }
-
-  /**
-   * Ensure token approval for SwapRouter
-   */
-  private async ensureTokenApproval(tokenAddress: string, amount: BigNumber): Promise<void> {
-    try {
-      // Skip approval for native HYPE
-      if (tokenAddress === ethers.constants.AddressZero || 
-          tokenAddress === '0x0000000000000000000000000000000000000000') {
-        return;
-      }
-
-      const signerAddress = await this.signer.getAddress();
-      const tokenContract = new ethers.Contract(tokenAddress, this.erc20ABI, this.signer);
-      
-      // Check current allowance
-      const allowance = await tokenContract['allowance'](signerAddress, this.swapRouterContract!.address);
-      
-      if (allowance.lt(amount)) {
-        this.logger.info('Approving token for SwapRouter', {
-          token: tokenAddress,
-          spender: this.swapRouterContract!.address,
-          amount: amount.toString()
-        });
-
-        // Approve maximum amount for efficiency
-        const approveTx = await tokenContract['approve'](
-          this.swapRouterContract!.address,
-          ethers.constants.MaxUint256
-        );
-        
-        await approveTx.wait();
-        this.logger.info('Token approval successful', { txHash: approveTx.hash });
-      } else {
-        this.logger.debug('Sufficient token allowance already exists');
-      }
-
-    } catch (error) {
-      this.logger.error('Token approval failed:', error);
-      throw new TradingError('Token approval failed', { originalError: error });
-    }
-  }
 
   /**
    * Get token information

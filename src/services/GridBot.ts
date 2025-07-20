@@ -76,6 +76,11 @@ export default class GridBot extends EventEmitter {
   private pairTotalTrades: Map<string, number> = new Map();
   private pairTotalProfit: Map<string, number> = new Map();
   private pairTotalFees: Map<string, number> = new Map();
+
+  // Core services for production trading
+  private provider: ethers.providers.JsonRpcProvider;
+  private signer: ethers.Wallet;
+  private tradingService: any; // HyperSwapV3TradingService instance
   private pairSuccessfulTrades: Map<string, number> = new Map();
   private pairFailedTrades: Map<string, number> = new Map();
 
@@ -85,24 +90,24 @@ export default class GridBot extends EventEmitter {
   private currentRangeMax: number | null = null;
   private lastRangeUpdate = 0;
 
-  // Enhanced Configuration - TIGHT ADAPTIVE GRID SYSTEM
+  // Enhanced Configuration - OPTIMIZED ADAPTIVE GRID SYSTEM
   private readonly ENHANCED_CONFIG = {
-    // Profitability Engine - PERCENTAGE-BASED MINIMUM PROFIT
-    // minProfitUsd: REMOVED - now calculated dynamically based on position size
-    baseProfitMargin: 0.040,        // 4.0% base margin (increased for profitability)
-    maxProfitMargin: 0.045,         // 4.5% max margin in low volatility
-    minProfitMargin: 0.035,         // 3.5% min margin in high volatility
+    // Profitability Engine - MATHEMATICALLY OPTIMIZED MARGINS
+    // Calculated based on: Gas ($0.0009) + Pool Fee (0.3%) + Slippage (0.05%) + Safety Buffer
+    baseProfitMargin: 0.012,        // 1.2% base margin (optimized for current costs)
+    maxProfitMargin: 0.015,         // 1.5% max margin in low volatility
+    minProfitMargin: 0.008,         // 0.8% min margin in high volatility
 
     // Market Intelligence
     volatilityWindow: 100,          // Price points for volatility calculation
-    highVolatilityThreshold: 0.05,  // 5% volatility threshold
-    lowVolatilityThreshold: 0.01,   // 1% volatility threshold
+    highVolatilityThreshold: parseFloat(process.env['HIGH_VOLATILITY_THRESHOLD'] || '0.05'),  // 5% volatility threshold
+    lowVolatilityThreshold: parseFloat(process.env['LOW_VOLATILITY_THRESHOLD'] || '0.01'),    // 1% volatility threshold
 
     // Grid Adaptation - DYNAMIC CONFIGURATION (uses .env values)
     baseGridCount: 8,               // Fallback: 8 grids (overridden by config.gridTrading.gridCount)
-    minGridCount: 6,                // Minimum grids (high volatility)
-    maxGridCount: 50,               // Maximum grids (low volatility) - increased for flexibility
-    adaptiveSpacing: true,          // RE-ENABLED: Dynamic grid adaptation for tight range
+    minGridCount: parseInt(process.env['MIN_GRID_COUNT'] || '6'),     // Minimum grids (high volatility)
+    maxGridCount: parseInt(process.env['MAX_GRID_COUNT'] || '50'),    // Maximum grids (low volatility)
+    adaptiveSpacing: true,          // Will be set from config after initialization
 
     // Dynamic Range Updates - NEW
     rangeUpdateThreshold: 0.03,     // 3% movement from range center triggers update
@@ -128,16 +133,18 @@ export default class GridBot extends EventEmitter {
 
   constructor(
     config: GridTradingConfig,
-    _provider: ethers.providers.JsonRpcProvider, // TODO: Use for production trading
-    _signer: ethers.Wallet, // TODO: Use for production trading
+    provider: ethers.providers.JsonRpcProvider,
+    signer: ethers.Wallet,
     onChainPriceService: OnChainPriceService
   ) {
     super();
 
     this.config = config;
-    // TODO: Store provider and signer for production trading
-    // this.provider = provider;
-    // this.signer = signer;
+    this.provider = provider;
+    this.signer = signer;
+
+    // Update ENHANCED_CONFIG with actual config values
+    this.ENHANCED_CONFIG.adaptiveSpacing = config.gridTrading.adaptiveSpacing || false;
 
     // Initialize multi-pair mode
     this.multiPairMode = config.gridTrading.multiPair?.enabled || false;
@@ -229,7 +236,8 @@ export default class GridBot extends EventEmitter {
       }
     }
 
-    if (!this.ENHANCED_CONFIG.adaptiveSpacing) {
+    // Check if adaptive features are enabled
+    if (!baseConfig.adaptiveEnabled || !this.ENHANCED_CONFIG.adaptiveSpacing) {
       return baseConfig;
     }
 
@@ -847,19 +855,88 @@ export default class GridBot extends EventEmitter {
    * Execute real order via SwapRouter (production implementation)
    */
   private async executeRealOrder(grid: GridLevel): Promise<void> {
-    // TODO: Implement actual SwapRouter integration
-    // This would use the SwapRouter contract to place limit orders
+    try {
+      this.logger.info(`🎯 Executing REAL ${grid.side} order via SwapRouter`, {
+        gridId: grid.id,
+        price: grid.price,
+        quantity: grid.quantity,
+        estimatedUsdValue: (grid.quantity * grid.price * 118000).toFixed(2)
+      });
 
-    this.logger.info(`Placing real ${grid.side} order via SwapRouter`, {
-      gridId: grid.id,
-      price: grid.price,
-      quantity: grid.quantity
-    });
+      // Initialize trading service if not already done
+      if (!this.tradingService) {
+        const HyperSwapV3TradingService = (await import('./hyperSwapV3TradingService')).default;
+        this.tradingService = new HyperSwapV3TradingService(
+          this.config,
+          this.provider,
+          this.signer
+        );
+        await this.tradingService.initialize();
+      }
 
-    // For now, simulate the order
-    grid.isActive = true;
-    grid.timestamp = Date.now();
-    this.activeOrders.set(grid.id, grid);
+      // Determine token addresses and amounts
+      const tokenAddresses = this.getTokenAddresses();
+      let tokenIn: string, tokenOut: string, amountIn: ethers.BigNumber;
+
+      if (grid.side === 'buy') {
+        // Buy WHYPE with UBTC
+        tokenIn = tokenAddresses.UBTC;
+        tokenOut = tokenAddresses.WHYPE;
+        amountIn = ethers.utils.parseUnits((grid.quantity * grid.price).toFixed(8), 8); // UBTC amount
+      } else {
+        // Sell WHYPE for UBTC
+        tokenIn = tokenAddresses.WHYPE;
+        tokenOut = tokenAddresses.UBTC;
+        amountIn = ethers.utils.parseUnits(grid.quantity.toFixed(18), 18); // WHYPE amount
+      }
+
+      // Calculate minimum amount out with slippage tolerance
+      const slippageTolerance = this.config.gridTrading.slippageTolerance || 0.02; // 2%
+      const expectedAmountOut = grid.side === 'buy'
+        ? ethers.utils.parseUnits(grid.quantity.toFixed(18), 18)
+        : ethers.utils.parseUnits((grid.quantity * grid.price).toFixed(8), 8);
+
+      const amountOutMinimum = expectedAmountOut.mul(Math.floor((1 - slippageTolerance) * 10000)).div(10000);
+
+      // Execute the swap using the corrected method
+      const receipt = await this.tradingService.executeSwap(
+        tokenIn,
+        tokenOut,
+        amountIn,
+        amountOutMinimum,
+        this.config.gridTrading.poolFee
+      );
+
+      this.logger.info(`🚀 Real swap transaction confirmed`, {
+        gridId: grid.id,
+        txHash: receipt.transactionHash,
+        tokenIn,
+        tokenOut,
+        amountIn: amountIn.toString(),
+        amountOutMinimum: amountOutMinimum.toString()
+      });
+
+      this.logger.info(`✅ Real swap confirmed`, {
+        gridId: grid.id,
+        txHash: receipt.transactionHash,
+        blockNumber: receipt.blockNumber,
+        gasUsed: receipt.gasUsed.toString(),
+        status: receipt.status
+      });
+
+      // Mark order as active and filled
+      grid.isActive = true;
+      grid.timestamp = Date.now();
+      grid.txHash = receipt.transactionHash;
+      this.activeOrders.set(grid.id, grid);
+
+      // Simulate immediate fill for now (in production, this would be event-driven)
+      setTimeout(() => this.simulateOrderFill(grid), 1000);
+
+    } catch (error) {
+      this.logger.error(`❌ Real order execution failed for ${grid.id}:`, error);
+      throw error;
+    }
   }
 
   /**
@@ -1773,5 +1850,17 @@ export default class GridBot extends EventEmitter {
     } catch (error) {
       this.logger.error('Failed to update multi-pair data store:', error);
     }
+  }
+
+  /**
+   * Get token addresses for trading
+   */
+  private getTokenAddresses(): { WHYPE: string; UBTC: string; HYPE: string; USDT0: string } {
+    return {
+      WHYPE: '0x5555555555555555555555555555555555555555',
+      UBTC: '0x9fdbda0a5e284c32744d2f17ee5c74b284993463',
+      HYPE: '0x0000000000000000000000000000000000000000',
+      USDT0: '0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb'
+    };
   }
 }

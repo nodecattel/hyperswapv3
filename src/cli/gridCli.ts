@@ -138,6 +138,17 @@ class GridCli {
         await this.startDashboard(options);
       });
 
+    // Adaptive grid configuration command
+    this.program
+      .command('adaptive')
+      .description('Configure adaptive grid settings')
+      .option('--enable', 'Enable adaptive grid features')
+      .option('--disable', 'Disable adaptive grid features')
+      .option('--status', 'Show current adaptive settings')
+      .action(async (options: CLIOptions) => {
+        await this.handleAdaptiveCommand(options);
+      });
+
     // Default interactive mode
     this.program
       .action(async () => {
@@ -278,6 +289,78 @@ class GridCli {
     } catch (error: any) {
       console.error(chalk.red('Error starting dashboard:'), error.message);
     }
+  }
+
+  /**
+   * Handle adaptive grid configuration commands
+   */
+  private async handleAdaptiveCommand(options: CLIOptions): Promise<void> {
+    const path = require('path');
+    const envPath = path.join(process.cwd(), '.env');
+
+    if (options.status) {
+      // Show current adaptive settings
+      console.log(chalk.blue('📊 Current Adaptive Grid Settings'));
+      console.log('─'.repeat(50));
+      console.log(`Adaptive Grid Enabled:    ${process.env['ADAPTIVE_GRID_ENABLED'] === 'true' ? chalk.green('✅ YES') : chalk.red('❌ NO')}`);
+      console.log(`Adaptive Spacing:         ${process.env['ADAPTIVE_SPACING_ENABLED'] === 'true' ? chalk.green('✅ YES') : chalk.red('❌ NO')}`);
+      console.log(`Adaptive Range:           ${process.env['ADAPTIVE_RANGE_ENABLED'] === 'true' ? chalk.green('✅ YES') : chalk.red('❌ NO')}`);
+      console.log(`High Volatility Threshold: ${process.env['HIGH_VOLATILITY_THRESHOLD'] || '0.05'} (${((parseFloat(process.env['HIGH_VOLATILITY_THRESHOLD'] || '0.05')) * 100).toFixed(1)}%)`);
+      console.log(`Low Volatility Threshold:  ${process.env['LOW_VOLATILITY_THRESHOLD'] || '0.01'} (${((parseFloat(process.env['LOW_VOLATILITY_THRESHOLD'] || '0.01')) * 100).toFixed(1)}%)`);
+      console.log(`Min Grid Count:           ${process.env['MIN_GRID_COUNT'] || '6'}`);
+      console.log(`Max Grid Count:           ${process.env['MAX_GRID_COUNT'] || '50'}`);
+      return;
+    }
+
+    if (options.enable) {
+      // Enable adaptive features
+      await this.updateEnvFile(envPath, {
+        'ADAPTIVE_GRID_ENABLED': 'true',
+        'ADAPTIVE_SPACING_ENABLED': 'true'
+      });
+      console.log(chalk.green('✅ Adaptive grid features enabled!'));
+      console.log(chalk.yellow('⚠️  Restart the bot for changes to take effect.'));
+      return;
+    }
+
+    if (options.disable) {
+      // Disable adaptive features
+      await this.updateEnvFile(envPath, {
+        'ADAPTIVE_GRID_ENABLED': 'false',
+        'ADAPTIVE_SPACING_ENABLED': 'false'
+      });
+      console.log(chalk.red('❌ Adaptive grid features disabled!'));
+      console.log(chalk.yellow('⚠️  Restart the bot for changes to take effect.'));
+      return;
+    }
+
+    // If no specific option, show interactive menu
+    console.log(chalk.blue('⚙️ Adaptive Grid Configuration'));
+    console.log('─'.repeat(50));
+    console.log(chalk.yellow('Use --status, --enable, or --disable flags for direct control'));
+  }
+
+  /**
+   * Update environment file with new values
+   */
+  private async updateEnvFile(envPath: string, updates: Record<string, string>): Promise<void> {
+    const fs = require('fs');
+
+    let envContent = '';
+    if (fs.existsSync(envPath)) {
+      envContent = fs.readFileSync(envPath, 'utf8');
+    }
+
+    for (const [key, value] of Object.entries(updates)) {
+      const regex = new RegExp(`^${key}=.*$`, 'm');
+      if (regex.test(envContent)) {
+        envContent = envContent.replace(regex, `${key}=${value}`);
+      } else {
+        envContent += `\n${key}=${value}`;
+      }
+    }
+
+    fs.writeFileSync(envPath, envContent);
   }
 
   /**

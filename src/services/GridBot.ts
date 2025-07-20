@@ -87,8 +87,8 @@ export default class GridBot extends EventEmitter {
 
   // Enhanced Configuration - TIGHT ADAPTIVE GRID SYSTEM
   private readonly ENHANCED_CONFIG = {
-    // Profitability Engine - UPDATED FOR TIGHT GRID STRATEGY
-    minProfitUsd: 0.54,             // $0.54 minimum profit (realistic for $358 investment)
+    // Profitability Engine - PERCENTAGE-BASED MINIMUM PROFIT
+    // minProfitUsd: REMOVED - now calculated dynamically based on position size
     baseProfitMargin: 0.040,        // 4.0% base margin (increased for profitability)
     maxProfitMargin: 0.045,         // 4.5% max margin in low volatility
     minProfitMargin: 0.035,         // 3.5% min margin in high volatility
@@ -566,19 +566,21 @@ export default class GridBot extends EventEmitter {
       const actualCosts = await this.calculateActualTradingCosts(positionSizeUsd);
       const netProfit = expectedProfit - actualCosts;
 
-      // Apply minimum profit threshold
-      const meetsMinimum = netProfit >= this.ENHANCED_CONFIG.minProfitUsd;
+      // Apply dynamic minimum profit threshold based on position size
+      const dynamicMinProfitUsd = this.calculateMinimumProfitUsd(positionSizeUsd);
+      const meetsMinimum = netProfit >= dynamicMinProfitUsd;
 
       // Additional checks
       const profitMarginPercent = netProfit / positionSizeUsd;
       const gridConfig = await this.getAdaptiveGridConfig();
       const meetsMarginRequirement = profitMarginPercent >= gridConfig.profitMargin;
 
-      this.logger.debug(`💰 Profitability check for ${grid.id} [CORRECTED COSTS]`, {
+      this.logger.debug(`💰 Profitability check for ${grid.id} [DYNAMIC MINIMUM PROFIT]`, {
         expectedProfit: expectedProfit.toFixed(2),
         actualCosts: actualCosts.toFixed(4),
         netProfit: netProfit.toFixed(2),
-        minRequired: this.ENHANCED_CONFIG.minProfitUsd,
+        minRequired: dynamicMinProfitUsd.toFixed(4),
+        minProfitPercentage: (this.config.gridTrading.minProfitPercentage * 100).toFixed(3) + '%',
         meetsMinimum,
         profitMarginPercent: (profitMarginPercent * 100).toFixed(2) + '%',
         meetsMarginRequirement,
@@ -630,6 +632,14 @@ export default class GridBot extends EventEmitter {
       // Fallback: Conservative estimate of 0.5% total costs
       return positionSizeUsd * 0.005;
     }
+  }
+
+  /**
+   * Calculate dynamic minimum profit based on position size
+   */
+  private calculateMinimumProfitUsd(positionSizeUsd: number): number {
+    const minProfitPercentage = this.config.gridTrading.minProfitPercentage;
+    return positionSizeUsd * minProfitPercentage;
   }
 
   /**
@@ -976,7 +986,7 @@ export default class GridBot extends EventEmitter {
       targetGridCount: this.config.gridTrading.gridCount,
       adaptiveRange: this.config.gridTrading.adaptiveRange,
       priceRangePercent: this.config.gridTrading.priceRangePercent ? `±${(this.config.gridTrading.priceRangePercent * 100).toFixed(1)}%` : 'fixed',
-      minProfitUsd: this.ENHANCED_CONFIG.minProfitUsd,
+      minProfitPercentage: `${(this.config.gridTrading.minProfitPercentage * 100).toFixed(3)}%`,
       batchOrders: this.ENHANCED_CONFIG.batchOrders,
       adaptiveSpacing: this.ENHANCED_CONFIG.adaptiveSpacing
     });
@@ -1343,7 +1353,7 @@ export default class GridBot extends EventEmitter {
         adaptive: this.ENHANCED_CONFIG.adaptiveSpacing
       },
       profitability: {
-        minProfitUsd: this.ENHANCED_CONFIG.minProfitUsd,
+        minProfitPercentage: this.config.gridTrading.minProfitPercentage,
         currentMargin: (await this.getAdaptiveGridConfig()).profitMargin,
         baseProfitMargin: this.ENHANCED_CONFIG.baseProfitMargin
       }

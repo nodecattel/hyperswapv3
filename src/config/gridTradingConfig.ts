@@ -187,6 +187,7 @@ class GridTradingConfig {
       maxDailyLoss: parseFloat(process.env['MAX_DAILY_LOSS_USD'] || '50'),
       stopLossEnabled: process.env['ENABLE_STOP_LOSS'] === 'true',
       stopLossPercentage: parseFloat(process.env['STOP_LOSS_PERCENTAGE'] || '0.1'),
+      minProfitPercentage: parseFloat(process.env['MIN_PROFIT_PERCENTAGE'] || '0.0015'), // 0.15% minimum profit per grid
       checkInterval: parseInt(process.env['GRID_CHECK_INTERVAL_MS'] || '5000'),
       baseToken: process.env['BASE_TOKEN'] || 'WHYPE',
       quoteToken: process.env['QUOTE_TOKEN'] || 'UBTC',

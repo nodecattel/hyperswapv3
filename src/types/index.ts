@@ -52,6 +52,7 @@ export interface GridTradingConfig {
   maxDailyLoss: number;
   stopLossEnabled: boolean;
   stopLossPercentage: number;
+  minProfitPercentage: number;  // Minimum profit as percentage of position size
   checkInterval: number;
   baseToken: string;
   quoteToken: string;

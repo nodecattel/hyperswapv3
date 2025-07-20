@@ -100,10 +100,20 @@ npm run grid:test      # Test setup and validation
 
 ### **Development Commands**
 ```bash
+# Core Development
+npm run dev            # Interactive CLI in development mode
+npm run dev:watch      # Development mode with auto-restart on file changes
+npm run dev:grid       # Direct grid CLI access for development
+npm run dev:dashboard  # Dashboard development mode with auto-restart
+
+# Build & Compilation
 npm run build          # Compile TypeScript to JavaScript
 npm run build:watch    # Watch mode compilation
 npm run type-check     # Type checking without compilation
-npm run dev            # Development mode with ts-node
+npm run clean          # Clean build directory
+
+# Code Quality
+npm run lint           # TypeScript strict mode linting
 ```
 
 ## 🔧 TypeScript Development

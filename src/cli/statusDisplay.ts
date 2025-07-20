@@ -885,12 +885,11 @@ class StatusDisplay {
     // Use actual bot configuration from comprehensive status
     const runtimeConfig = comprehensiveStatus.runtimeConfig || {};
     const baseConfig = runtimeConfig.baseConfig || {};
-    const enhancedConfig = runtimeConfig.enhancedConfig || {};
 
     const gridCount = adaptiveConfig.gridCount || baseConfig.gridCount || 8;
     const totalInvestment = baseConfig.totalInvestment || 300;
     const profitMargin = adaptiveConfig.profitMargin || baseConfig.profitMargin || 0.04;
-    const minProfitUsd = enhancedConfig.minProfitUsd || 0.54;
+    const minProfitPercentage = baseConfig.minProfitPercentage || 0.0015; // 0.15% default
 
     // Use actual price range from adaptive configuration
     const minPrice = adaptiveConfig.minPrice || baseConfig.minPrice || currentPrice * 0.95;
@@ -909,11 +908,12 @@ class StatusDisplay {
       const side = price < currentPrice ? 'BUY ' : 'SELL';
       const sideColor = side === 'BUY ' ? chalk.green(side) : chalk.red(side);
 
-      // Calculate profitability with corrected cost model
+      // Calculate profitability with dynamic minimum profit
       const grossProfit = positionSize * profitMargin;
       const actualCosts = this.calculateActualTradingCosts(positionSize, hypePrice);
       const netProfit = grossProfit - actualCosts;
-      const isProfitable = netProfit >= minProfitUsd;
+      const dynamicMinProfitUsd = positionSize * minProfitPercentage;
+      const isProfitable = netProfit >= dynamicMinProfitUsd;
 
       // Format display
       const gridNum = i.toString().padEnd(4);
@@ -961,15 +961,16 @@ class StatusDisplay {
 
     const gridInfo = status.gridInfo || {};
     const gridCount = gridInfo.totalGrids || 8; // Updated for tight adaptive
-    const minProfitUsd = 0.54;
-    const positionSizeUsd = 358 / gridCount; // $358 total / 8 grids = $44.75 per grid
+    const positionSizeUsd = 300 / gridCount; // $300 total investment
+    const minProfitPercentage = 0.0015; // 0.15% minimum profit percentage
+    const dynamicMinProfitUsd = positionSizeUsd * minProfitPercentage;
     const actualCosts = this.calculateActualTradingCosts(positionSizeUsd, hypePrice);
 
     // Calculate expected profit with corrected costs
     const expectedProfit = positionSizeUsd * 0.04; // 4% profit margin
     const netProfit = expectedProfit - actualCosts;
 
-    if (netProfit >= minProfitUsd) {
+    if (netProfit >= dynamicMinProfitUsd) {
       console.log(chalk.green('✅ ALL GRIDS ARE PROFITABLE'));
       console.log(`   • All ${gridCount} grids meet profitability requirements`);
       console.log(`   • Expected net profit: $${netProfit.toFixed(2)} per trade`);
@@ -979,7 +980,7 @@ class StatusDisplay {
     } else {
       console.log(chalk.red('❌ NO PROFITABLE GRIDS AVAILABLE'));
       console.log(`   • All ${gridCount} grids fail profitability check`);
-      console.log(`   • Minimum profit required: $${minProfitUsd}`);
+      console.log(`   • Minimum profit required: $${dynamicMinProfitUsd.toFixed(4)} (${(minProfitPercentage * 100).toFixed(3)}% of position)`);
       console.log(`   • Actual trading costs: $${actualCosts.toFixed(4)} per trade`);
       console.log(`   • Cost breakdown: Gas (~$0.0009) + Pool fees (0.3%) + Slippage (~0.05%)`);
     }
@@ -1073,11 +1074,12 @@ class StatusDisplay {
     const config = status.config || {};
     const gridConfig = config.gridTrading || {};
     const gridCount = gridConfig.gridCount || 8; // Updated for tight adaptive
-    const totalInvestment = parseInt(gridConfig.investment?.replace('$', '')) || 358;
+    const totalInvestment = parseInt(gridConfig.investment?.replace('$', '')) || 300;
     const profitMargin = parseFloat(gridConfig.profitMargin) / 100 || 0.04;
-    const minProfitUsd = 0.54;
+    const minProfitPercentage = 0.0015; // 0.15% minimum profit percentage
 
     const positionSize = totalInvestment / gridCount;
+    const dynamicMinProfitUsd = positionSize * minProfitPercentage;
     const actualCosts = this.calculateActualTradingCosts(positionSize, hypePrice);
     const feeRatio = actualCosts / positionSize;
 
@@ -1085,7 +1087,7 @@ class StatusDisplay {
     console.log(`Trading Costs:        $${actualCosts.toFixed(4)} per complete trade`);
     console.log(`Cost Ratio:           ${chalk.green((feeRatio * 100).toFixed(3) + '%')} of position size`);
     console.log(`Profit Margin:        ${chalk.cyan((profitMargin * 100).toFixed(1) + '%')}`);
-    console.log(`Min Profit Required:  $${minProfitUsd}`);
+    console.log(`Min Profit Required:  $${dynamicMinProfitUsd.toFixed(4)} (${(minProfitPercentage * 100).toFixed(3)}% of position)`);
 
     if (feeRatio > 0.05) {
       console.log(chalk.red(`⚠️ High fee ratio (${(feeRatio * 100).toFixed(1)}%) may prevent profitable trades`));

@@ -33,6 +33,10 @@
       "grid:adaptive": "ts-node src/cli/gridCli.ts adaptive",
       "grid:watch": "ts-node src/cli/gridCli.ts status --watch",
       "grid:test": "ts-node src/cli/gridCli.ts test",
+      "swap": "ts-node src/cli/swapCli.ts interactive",
+      "swap:interactive": "ts-node src/cli/swapCli.ts interactive",
+      "swap:list": "ts-node src/cli/swapCli.ts list",
+      "swap:balance": "ts-node src/cli/swapCli.ts balance",
       "clean": "rm -rf dist",
       "type-check": "tsc --noEmit",
       "lint": "tsc --noEmit --strict"

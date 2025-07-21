@@ -166,14 +166,14 @@ class StatusDisplay {
       await this.showSingleStatus(true);
 
       console.log('');
-      console.log(chalk.gray('🔄 Auto-refreshing every 10 seconds... Press Ctrl+C to exit'));
+      console.log(chalk.gray('🔄 Auto-refreshing every 30 seconds... Press Ctrl+C to exit'));
     };
 
     // Initial display
     await refreshStatus();
 
     // Set up auto-refresh
-    const interval = setInterval(refreshStatus, 10000);
+    const interval = setInterval(refreshStatus, 30000);
 
     // Handle Ctrl+C
     process.on('SIGINT', () => {

@@ -107,12 +107,45 @@ class HyperSwapPoolService {
           recommended: true // Only pool for this pair
         }
       }
+    },
+
+    // WHYPE pairs (for grid bot multi-pair trading)
+    'WHYPE/UBTC': {
+      token0: 'WHYPE',
+      token1: 'UBTC',
+      pools: {
+        '0.3%': {
+          address: '0x3a36b04bcc1d5e2e303981ef643d2668e00b43e7',
+          fee: 3000,
+          tvl: 7840000, // $7.84M (same as HYPE/UBTC)
+          dailyVolume: 2800000, // $2.8M
+          verified: true,
+          recommended: true
+        }
+      }
+    },
+
+    'WHYPE/USDT0': {
+      token0: 'WHYPE',
+      token1: 'USDT0',
+      pools: {
+        '0.05%': {
+          address: '0x337b56d87a6185cd46af3ac2cdf03cbc37070c30',
+          fee: 500,
+          tvl: 6730000, // $6.73M (same as HYPE/USD₮0)
+          dailyVolume: 22950000, // $22.95M
+          verified: true,
+          recommended: true
+        }
+      }
     }
   };
 
   // Pool priority order for trading (highest volume/liquidity first)
   private readonly POOL_PRIORITY = [
+    'WHYPE/USDT0', // Highest volume: $22.95M daily (grid bot primary)
     'HYPE/USD₮0',  // Highest volume: $22.95M daily
+    'WHYPE/UBTC',  // Good volume: $2.8M daily (grid bot primary)
     'HYPE/UBTC',   // Good volume: $2.8M daily
     'USDHL/USD₮0', // Stable pair: $5.5M daily
     'HYPE/USDHL'   // Lower volume: $2.2M daily

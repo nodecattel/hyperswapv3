@@ -123,7 +123,7 @@ export default class GridBot extends EventEmitter {
 
     // Monitoring
     checkInterval: 5000,            // 5 second monitoring
-    priceUpdateThreshold: 0.001,    // 0.1% price movement threshold
+    priceUpdateThreshold: 0.0001,   // 0.01% price movement threshold (LOWERED FOR MORE SENSITIVITY)
 
     // Risk Management
     maxPositionSize: 0.15,          // 15% max per grid (increased for fewer grids)
@@ -429,12 +429,31 @@ export default class GridBot extends EventEmitter {
       // Determine price direction and magnitude
       if (previousPrice) {
         const priceChange = (newPrice - previousPrice) / previousPrice;
-        
+        const priceChangePercent = (priceChange * 100).toFixed(4);
+
+        this.logger.info(`💹 Price movement detected`, {
+          previousPrice,
+          newPrice,
+          priceChange: `${priceChangePercent}%`,
+          threshold: `${(this.ENHANCED_CONFIG.priceUpdateThreshold * 100).toFixed(4)}%`,
+          triggersGrid: Math.abs(priceChange) > this.ENHANCED_CONFIG.priceUpdateThreshold
+        });
+
         if (Math.abs(priceChange) > this.ENHANCED_CONFIG.priceUpdateThreshold) {
           this.priceDirection = newPrice > previousPrice ? 'up' : 'down';
-          
+
+          this.logger.info(`🎯 Grid trigger threshold exceeded - checking for trades`, {
+            direction: this.priceDirection,
+            priceChange: `${priceChangePercent}%`
+          });
+
           // Check for grid triggers with enhanced logic
           await this.checkEnhancedGridTriggers(newPrice, previousPrice);
+        } else {
+          this.logger.debug(`📊 Price change below threshold`, {
+            priceChange: `${priceChangePercent}%`,
+            required: `${(this.ENHANCED_CONFIG.priceUpdateThreshold * 100).toFixed(4)}%`
+          });
         }
       }
 
@@ -890,39 +909,56 @@ export default class GridBot extends EventEmitter {
         amountIn = ethers.utils.parseUnits(grid.quantity.toFixed(18), 18); // WHYPE amount
       }
 
-      // Calculate minimum amount out with slippage tolerance
-      const slippageTolerance = this.config.gridTrading.slippageTolerance || 0.02; // 2%
-      const expectedAmountOut = grid.side === 'buy'
-        ? ethers.utils.parseUnits(grid.quantity.toFixed(18), 18)
-        : ethers.utils.parseUnits((grid.quantity * grid.price).toFixed(8), 8);
+      // Get real quote from QuoterV2 (same as multi-pair mode)
+      const poolFee = this.config.gridTrading.poolFee || 3000;
+      const quote = await this.pricingService.getPriceQuote(tokenIn, tokenOut, amountIn, poolFee);
 
+      if (!quote) {
+        throw new Error(`Failed to get quote for WHYPE/UBTC swap`);
+      }
+
+      // Calculate minimum amount out with slippage tolerance using real quote
+      const slippageTolerance = this.config.gridTrading.slippageTolerance || 0.02; // 2%
+      const expectedAmountOut = quote.amountOut;
       const amountOutMinimum = expectedAmountOut.mul(Math.floor((1 - slippageTolerance) * 10000)).div(10000);
 
-      // Execute the swap using the corrected method
+      this.logger.info(`🔄 [WHYPE/UBTC] Executing ${grid.side} trade`, {
+        gridId: grid.id,
+        tokenIn: tokenIn,
+        tokenOut: tokenOut,
+        amountIn: ethers.utils.formatUnits(amountIn, grid.side === 'buy' ? 8 : 18),
+        expectedOut: ethers.utils.formatUnits(expectedAmountOut, grid.side === 'buy' ? 18 : 8),
+        price: grid.price.toFixed(8),
+        poolFee: poolFee,
+        slippage: `${(slippageTolerance * 100).toFixed(1)}%`,
+        quoteSource: quote.source || 'QuoterV2'
+      });
+
+      // Execute the swap using real quote
+      const recipient = await this.signer.getAddress();
       const receipt = await this.tradingService.executeSwap(
         tokenIn,
         tokenOut,
         amountIn,
         amountOutMinimum,
-        this.config.gridTrading.poolFee
+        poolFee,
+        recipient
       );
 
-      this.logger.info(`🚀 Real swap transaction confirmed`, {
+      this.logger.info(`✅ Trade executed successfully`, {
         gridId: grid.id,
-        txHash: receipt.transactionHash,
-        tokenIn,
-        tokenOut,
-        amountIn: amountIn.toString(),
-        amountOutMinimum: amountOutMinimum.toString()
-      });
-
-      this.logger.info(`✅ Real swap confirmed`, {
-        gridId: grid.id,
-        txHash: receipt.transactionHash,
+        transactionHash: receipt.transactionHash,
         blockNumber: receipt.blockNumber,
         gasUsed: receipt.gasUsed.toString(),
-        status: receipt.status
+        status: receipt.status === 1 ? 'SUCCESS' : 'FAILED',
+        tokenIn,
+        tokenOut,
+        amountIn: ethers.utils.formatUnits(amountIn, grid.side === 'buy' ? 8 : 18),
+        expectedOut: ethers.utils.formatUnits(expectedAmountOut, grid.side === 'buy' ? 18 : 8),
+        minimumOut: ethers.utils.formatUnits(amountOutMinimum, grid.side === 'buy' ? 18 : 8)
       });
+
+
 
       // Mark order as active and filled
       grid.isActive = true;
@@ -1694,20 +1730,47 @@ export default class GridBot extends EventEmitter {
    * Start monitoring for multi-pair mode
    */
   private startMultiPairMonitoring(): void {
+    this.logger.info('🚀 Starting multi-pair monitoring...', {
+      pairs: Array.from(this.pairConfigs.keys()),
+      checkInterval: this.ENHANCED_CONFIG.checkInterval,
+      isRunning: this.isRunning
+    });
+
     const runMonitoringCycle = async (): Promise<void> => {
-      if (!this.isRunning) return;
+      if (!this.isRunning) {
+        this.logger.debug('⏹️ Monitoring cycle skipped - bot not running');
+        return;
+      }
 
       try {
+        this.logger.debug('🔄 Starting multi-pair monitoring cycle...', {
+          activePairs: this.pairConfigs.size,
+          timestamp: new Date().toISOString()
+        });
+
         // Monitor each trading pair
         for (const pairId of this.pairConfigs.keys()) {
-          await this.monitorPairGrids(pairId);
+          this.logger.debug(`📊 Monitoring pair: ${pairId}`);
+          try {
+            await this.monitorPairGrids(pairId);
+          } catch (error) {
+            this.logger.error(`❌ Error monitoring pair ${pairId}:`, error);
+            throw error; // Re-throw to see the full error
+          }
         }
 
         // Update unified metrics
-        await this.updateMultiPairDataStore();
+        try {
+          await this.updateMultiPairDataStore();
+        } catch (error) {
+          this.logger.error(`❌ Error updating multi-pair data store:`, error);
+          throw error; // Re-throw to see the full error
+        }
+
+        this.logger.debug('✅ Multi-pair monitoring cycle completed');
 
       } catch (error) {
-        this.logger.error('Multi-pair monitoring cycle error:', error);
+        this.logger.error('❌ Multi-pair monitoring cycle error:', error);
       }
 
       // Schedule next cycle
@@ -1717,6 +1780,7 @@ export default class GridBot extends EventEmitter {
     };
 
     // Start first cycle
+    this.logger.info('⏰ Starting first monitoring cycle...');
     runMonitoringCycle();
   }
 
@@ -1754,10 +1818,32 @@ export default class GridBot extends EventEmitter {
       await this.updatePairPriceHistory(pairId, currentPrice);
 
       // Check for grid triggers
+      let triggeredGrids = 0;
       for (const grid of grids) {
         if (pendingGrids.has(grid.id) && this.shouldTriggerPairGrid(grid, currentPrice)) {
-          await this.simulatePairTrade(pairId, grid, currentPrice);
+          triggeredGrids++;
+          this.logger.info(`🎯 Grid triggered for ${pairId}`, {
+            gridId: grid.id,
+            gridPrice: grid.price,
+            currentPrice,
+            side: grid.side,
+            dryRun: this.config.safety.dryRun
+          });
+
+          if (this.config.safety.dryRun) {
+            await this.simulatePairTrade(pairId, grid, currentPrice);
+          } else {
+            await this.executePairTrade(pairId, grid, currentPrice);
+          }
         }
+      }
+
+      if (triggeredGrids === 0) {
+        this.logger.debug(`📊 No grids triggered for ${pairId}`, {
+          currentPrice,
+          pendingGrids: pendingGrids.size,
+          totalGrids: grids.length
+        });
       }
     } else {
       this.logger.warn(`Failed to get price for pair: ${baseToken}/${quoteToken}`);
@@ -1769,13 +1855,147 @@ export default class GridBot extends EventEmitter {
    */
   private shouldTriggerPairGrid(grid: GridLevel, currentPrice: number): boolean {
     // Simple trigger logic: price crosses grid level
-    if (grid.side === 'buy' && currentPrice <= grid.price) {
-      return true;
+    const shouldTrigger = (grid.side === 'buy' && currentPrice <= grid.price) ||
+                         (grid.side === 'sell' && currentPrice >= grid.price);
+
+    if (shouldTrigger) {
+      this.logger.info(`✅ Grid trigger condition met`, {
+        gridId: grid.id,
+        side: grid.side,
+        gridPrice: grid.price,
+        currentPrice,
+        condition: grid.side === 'buy' ? 'currentPrice <= gridPrice' : 'currentPrice >= gridPrice'
+      });
     }
-    if (grid.side === 'sell' && currentPrice >= grid.price) {
-      return true;
+
+    return shouldTrigger;
+  }
+
+  /**
+   * Execute real trade for a specific pair (LIVE mode)
+   */
+  private async executePairTrade(pairId: string, grid: GridLevel, currentPrice: number): Promise<void> {
+    const pairConfig = this.pairConfigs.get(pairId)!;
+    const pendingGrids = this.pairPendingGrids.get(pairId)!;
+
+    try {
+      // Initialize trading service if not already done
+      if (!this.tradingService) {
+        const HyperSwapV3TradingService = (await import('./hyperSwapV3TradingService')).default;
+        this.tradingService = new HyperSwapV3TradingService(
+          this.config,
+          this.provider,
+          this.signer
+        );
+        await this.tradingService.initialize();
+        this.logger.info(`✅ Trading service initialized for multi-pair mode`);
+      }
+
+      // Extract base and quote tokens from pairId
+      const tokens = pairId.split('_');
+      const baseToken = tokens[0]!;
+      const quoteToken = tokens[1]!;
+
+      // Get token addresses
+      const tokenAddresses = this.getTokenAddresses();
+      let tokenIn: string, tokenOut: string, amountIn: ethers.BigNumber;
+
+      if (grid.side === 'buy') {
+        // Buy WHYPE with quote token (UBTC/USDT0)
+        tokenIn = tokenAddresses[quoteToken as keyof typeof tokenAddresses];
+        tokenOut = tokenAddresses[baseToken as keyof typeof tokenAddresses];
+        amountIn = ethers.utils.parseUnits((grid.quantity * grid.price).toFixed(8),
+          quoteToken === 'UBTC' ? 8 : 6); // UBTC has 8 decimals, USDT0 has 6
+      } else {
+        // Sell WHYPE for quote token
+        tokenIn = tokenAddresses[baseToken as keyof typeof tokenAddresses];
+        tokenOut = tokenAddresses[quoteToken as keyof typeof tokenAddresses];
+        amountIn = ethers.utils.parseUnits(grid.quantity.toFixed(18), 18); // WHYPE has 18 decimals
+      }
+
+      // Validate token addresses
+      if (!tokenIn || !tokenOut || !ethers.utils.isAddress(tokenIn) || !ethers.utils.isAddress(tokenOut)) {
+        throw new Error(`Invalid token addresses: tokenIn=${tokenIn}, tokenOut=${tokenOut}`);
+      }
+
+      // Calculate expected output using pricing service
+      const poolFee = pairConfig.poolFee || 3000;
+      const quote = await this.pricingService.getPriceQuote(tokenIn, tokenOut, amountIn, poolFee);
+
+      if (!quote) {
+        throw new Error(`Failed to get quote for ${baseToken}/${quoteToken} swap`);
+      }
+
+      const expectedAmountOut = quote.amountOut;
+      const slippageTolerance = this.config.gridTrading.slippageTolerance || 0.02;
+      const amountOutMinimum = expectedAmountOut.mul(Math.floor((1 - slippageTolerance) * 10000)).div(10000);
+
+      // Execute the swap
+      const recipient = await this.signer.getAddress();
+
+      this.logger.info(`🔄 [${pairId}] Executing ${grid.side} trade`, {
+        gridId: grid.id,
+        tokenPair: `${baseToken}/${quoteToken}`,
+        tokenIn: tokenIn,
+        tokenOut: tokenOut,
+        amountIn: ethers.utils.formatUnits(amountIn, grid.side === 'buy' ? (quoteToken === 'UBTC' ? 8 : 6) : 18),
+        expectedOut: ethers.utils.formatUnits(expectedAmountOut, grid.side === 'buy' ? 18 : (quoteToken === 'UBTC' ? 8 : 6)),
+        price: currentPrice.toFixed(8),
+        poolFee: poolFee,
+        slippage: `${(slippageTolerance * 100).toFixed(1)}%`
+      });
+
+      const txResult = await this.tradingService.executeSwap(
+        tokenIn,
+        tokenOut,
+        amountIn,
+        amountOutMinimum,
+        poolFee,
+        recipient
+      );
+
+      // Calculate actual profit
+      const profit = grid.quantity * currentPrice * pairConfig.profitMargin;
+
+      // Update pair-specific performance tracking
+      const currentTrades = this.pairTotalTrades.get(pairId) || 0;
+      const currentProfit = this.pairTotalProfit.get(pairId) || 0;
+      const currentSuccessful = this.pairSuccessfulTrades.get(pairId) || 0;
+
+      this.pairTotalTrades.set(pairId, currentTrades + 1);
+      this.pairTotalProfit.set(pairId, currentProfit + profit);
+      this.pairSuccessfulTrades.set(pairId, currentSuccessful + 1);
+
+      // Update global totals
+      this.totalTrades++;
+      this.totalProfit += profit;
+
+      // Remove from pending grids
+      pendingGrids.delete(grid.id);
+
+      this.logger.info(`💰 [${pairId}] Real trade executed successfully`, {
+        gridId: grid.id,
+        side: grid.side,
+        price: currentPrice.toFixed(8),
+        profit: `$${profit.toFixed(2)}`,
+        txHash: txResult.hash,
+        pairTotalTrades: this.pairTotalTrades.get(pairId),
+        pairTotalProfit: `$${this.pairTotalProfit.get(pairId)?.toFixed(2)}`
+      });
+
+    } catch (error) {
+      this.logger.error(`❌ [${pairId}] Trade execution failed`, {
+        gridId: grid.id,
+        side: grid.side,
+        price: currentPrice.toFixed(8),
+        pairId: pairId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+
+      // Don't remove from pending grids on failure - allow retry
+      // Grid will remain in pending state for next trigger attempt
     }
-    return false;
   }
 
   /**

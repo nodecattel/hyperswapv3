@@ -1,0 +1,228 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* HyperAlgo Terminal Theme - Dark #191919 */
+  --background: hsl(0, 0%, 10%);
+  --foreground: hsl(0, 0%, 95%);
+  --muted: hsl(0, 0%, 12%);
+  --muted-foreground: hsl(0, 0%, 70%);
+  --popover: hsl(0, 0%, 10%);
+  --popover-foreground: hsl(0, 0%, 95%);
+  --card: hsl(0, 0%, 12%);
+  --card-foreground: hsl(0, 0%, 95%);
+  --border: hsl(175, 89%, 74%);
+  --input: hsl(0, 0%, 15%);
+  --primary: hsl(175, 89%, 74%);
+  --primary-foreground: hsl(0, 0%, 10%);
+  --secondary: hsl(0, 0%, 15%);
+  --secondary-foreground: hsl(0, 0%, 85%);
+  --accent: hsl(175, 89%, 74%);
+  --accent-foreground: hsl(0, 0%, 10%);
+  --destructive: hsl(345, 83%, 47%);
+  --destructive-foreground: hsl(0, 0%, 100%);
+  --ring: hsl(175, 89%, 74%);
+  --radius: 0rem;
+  
+  /* HyperAlgo specific colors */
+  --terminal-bg: hsl(0, 0%, 10%);
+  --terminal-border: hsl(175, 89%, 74%);
+  --profit: hsl(175, 89%, 74%);
+  --loss: hsl(0, 0%, 60%);
+  --warning: hsl(0, 0%, 80%);
+  
+  /* Sidebar colors */
+  --sidebar-background: hsl(0, 0%, 8%);
+  --sidebar-foreground: hsl(0, 0%, 95%);
+  --sidebar-primary: hsl(175, 89%, 74%);
+  --sidebar-primary-foreground: hsl(0, 0%, 10%);
+  --sidebar-accent: hsl(0, 0%, 12%);
+  --sidebar-accent-foreground: hsl(0, 0%, 95%);
+  --sidebar-border: hsl(175, 89%, 74%);
+  --sidebar-ring: hsl(175, 89%, 74%);
+}
+
+.dark {
+  /* Same variables as :root for dark mode consistency */
+  --background: hsl(0, 0%, 10%);
+  --foreground: hsl(0, 0%, 95%);
+  --muted: hsl(0, 0%, 12%);
+  --muted-foreground: hsl(0, 0%, 70%);
+  --popover: hsl(0, 0%, 10%);
+  --popover-foreground: hsl(0, 0%, 95%);
+  --card: hsl(0, 0%, 12%);
+  --card-foreground: hsl(0, 0%, 95%);
+  --border: hsl(175, 89%, 74%);
+  --input: hsl(0, 0%, 15%);
+  --primary: hsl(175, 89%, 74%);
+  --primary-foreground: hsl(0, 0%, 10%);
+  --secondary: hsl(0, 0%, 15%);
+  --secondary-foreground: hsl(0, 0%, 85%);
+  --accent: hsl(175, 89%, 74%);
+  --accent-foreground: hsl(0, 0%, 10%);
+  --destructive: hsl(345, 83%, 47%);
+  --destructive-foreground: hsl(0, 0%, 100%);
+  --ring: hsl(175, 89%, 74%);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    font-family: 'Menlo', 'Monaco', 'Consolas', 'Liberation Mono', 'Courier New', monospace;
+    letter-spacing: 0.02em;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-size: 14px;
+    line-height: 1.4;
+  }
+  .custom-scrollbar::-webkit-scrollbar {
+    width: 2px;
+  }
+  .custom-scrollbar::-webkit-scrollbar-track {
+    background: hsl(0, 0%, 10%);
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb {
+    background: hsl(175, 89%, 74%);
+    border-radius: 0;
+  }
+  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: hsl(175, 89%, 74%);
+  }
+}
+
+@layer components {
+  .terminal-button {
+    @apply bg-transparent border border-terminal-border text-terminal-border transition-all duration-200;
+  }
+  
+  .terminal-button:hover {
+    @apply bg-terminal-border text-background;
+  }
+  
+  .terminal-button-active {
+    @apply bg-terminal-border text-background;
+  }
+  
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(175, 89%, 74%) hsl(0, 0%, 10%);
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 2px;
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: hsl(0, 0%, 10%);
+  }
+  
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(175, 89%, 74%);
+    border-radius: 0;
+  }
+  
+  .status-dot {
+    @apply w-1 h-1;
+  }
+  
+  .profit {
+    color: hsl(175, 89%, 74%);
+  }
+  
+  .loss {
+    color: hsl(0, 0%, 65%);
+  }
+  
+  .warning {
+    color: hsl(0, 0%, 80%);
+  }
+  
+  .neutral {
+    color: hsl(0, 0%, 85%);
+  }
+}
+
+@layer utilities {
+  .animate-fade-in {
+    animation: fadeIn 0.5s ease-in-out;
+  }
+  .animate-slide-up {
+    animation: slideUp 0.3s ease-out;
+  }
+  .animate-pulse-soft {
+    animation: pulseSoft 2s infinite;
+  }
+  .terminal-bg {
+    background-color: hsl(0, 0%, 10%);
+  }
+  
+  .terminal-border {
+    border-color: hsl(175, 89%, 74%);
+  }
+  .terminal-text {
+    color: hsl(175, 89%, 74%);
+  }
+  .terminal-glow {
+    box-shadow: 0 0 10px hsl(175, 89%, 74%);
+  }
+  .terminal-cursor::after {
+    content: '_';
+    animation: blink 1s infinite;
+    color: hsl(175, 89%, 74%);
+  }
+  @keyframes blink {
+    0%, 50% { opacity: 1; }
+    51%, 100% { opacity: 0; }
+  }
+  .terminal-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    position: relative;
+  }
+  .terminal-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: hsl(175, 89%, 74%);
+    opacity: 0.3;
+  }
+  .no-rounded * {
+    border-radius: 0 !important;
+  }
+}
+
+@keyframes fadeIn {
+  0% { 
+    opacity: 0; 
+    transform: translateY(10px); 
+  }
+  100% { 
+    opacity: 1; 
+    transform: translateY(0); 
+  }
+}
+
+@keyframes slideUp {
+  0% { 
+    transform: translateY(20px); 
+    opacity: 0; 
+  }
+  100% { 
+    transform: translateY(0); 
+    opacity: 1; 
+  }
+}
+
+@keyframes pulseSoft {
+  0%, 100% { 
+    opacity: 0.5; 
+  }
+  50% { 
+    opacity: 0.8; 
+  }
+}

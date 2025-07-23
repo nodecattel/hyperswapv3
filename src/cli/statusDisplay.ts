@@ -222,20 +222,19 @@ class StatusDisplay {
       }
     }
 
-    if (detailed && isRunning) {
+    if (detailed) {
+      // 🔧 FIX: Show performance metrics and trades regardless of bot running status
       console.log('');
       this.displayPerformanceMetrics(status, trades);
 
       console.log('');
       this.displayRecentTrades(trades);
 
-      console.log('');
-      await this.displayComprehensiveBalances();
+      if (isRunning) {
+        console.log('');
+        await this.displayComprehensiveBalances();
+      }
 
-      console.log('');
-      await this.displayLiveConfigurationVerification();
-    } else if (detailed && !isRunning) {
-      // Show configuration verification even when bot is stopped
       console.log('');
       await this.displayLiveConfigurationVerification();
 
@@ -751,6 +750,16 @@ class StatusDisplay {
 
     // Show configuration analysis
     await this.displayConfigurationAnalysis({});
+
+    // 🔧 FIX: Add performance metrics and recent trades to multi-pair display
+    const status = this.dataStore.getStatus();
+    const trades = this.dataStore.getTrades(10);
+
+    console.log('');
+    this.displayPerformanceMetrics(status, trades);
+
+    console.log('');
+    this.displayRecentTrades(trades);
   }
 
   /**
@@ -790,8 +799,8 @@ class StatusDisplay {
       const whypeUsdt0Pair = enabledPairs.find(p => p.name === 'WHYPE/USDT0');
       if (whypeUsdt0Pair) {
         try {
-          // Get WHYPE/USDT0 price directly from OnChainPriceService
-          const whypeUsdt0Price = await this.pricingService.getPairPrice('WHYPE', 'USDT0');
+          // Get WHYPE/USDT0 price directly from OnChainPriceService (force fresh for status display)
+          const whypeUsdt0Price = await this.pricingService.getPairPrice('WHYPE', 'USDT0', true);
 
           if (whypeUsdt0Price && whypeUsdt0Price > 0) {
             await this.displayPairGridLevels(

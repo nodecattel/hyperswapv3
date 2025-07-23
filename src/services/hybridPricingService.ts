@@ -3,6 +3,7 @@ import * as winston from 'winston';
 import { PriceQuote } from '../types';
 import OnChainPriceService from './onChainPriceService';
 import HyperLiquidWebSocketService from './hyperliquidWebSocketService';
+import { RealTimePriceService } from './RealTimePriceService';
 import GridTradingConfig from '../config/gridTradingConfig';
 
 interface PriceConversionRates {
@@ -23,8 +24,8 @@ class HybridPricingService {
   private logger: winston.Logger;
   private onChainService: OnChainPriceService;
   private webSocketService: HyperLiquidWebSocketService;
+  public realTimePriceService: RealTimePriceService;
   private conversionRates: PriceConversionRates | null = null;
-  private cacheExpiryMs: number = 30000; // 30 seconds
   private config: GridTradingConfig;
 
   constructor(
@@ -36,6 +37,9 @@ class HybridPricingService {
     this.onChainService = onChainService;
     this.webSocketService = webSocketService;
     this.config = config;
+
+    // Initialize RealTimePriceService with retry logic for WebSocket initialization
+    this.realTimePriceService = new RealTimePriceService(webSocketService, onChainService.getProvider(), logger);
     
     this.logger = logger || winston.createLogger({
       level: 'info',
@@ -56,33 +60,32 @@ class HybridPricingService {
   }
 
   /**
-   * Get best available price for WHYPE/UBTC
+   * Get best available price for WHYPE/UBTC (QuoterV2 on-chain only)
+   *
+   * IMPORTANT: WHYPE/UBTC prices are ONLY available through QuoterV2 on-chain contracts
+   * WebSocket is NOT used for WHYPE/UBTC prices - only for BTC/USD and HYPE/USD reference prices
    */
   public async getWHYPEUBTCPrice(): Promise<number | null> {
     try {
-      // 1. Try direct on-chain WHYPE/UBTC quote first
+      // 1. Try direct on-chain WHYPE/UBTC quote first (QuoterV2)
       const directPrice = await this.getDirectOnChainPrice();
       if (directPrice) {
-        this.logger.info(`Direct WHYPE/UBTC price: ${directPrice.toFixed(8)}`);
+        this.logger.info(`✅ Direct WHYPE/UBTC price from QuoterV2: ${directPrice.toFixed(8)}`);
         return directPrice;
       }
 
-      // 2. Try WHYPE/USDT0 + USDT0/UBTC conversion
+      // 2. Try WHYPE/USDT0 + USDT0/UBTC conversion (QuoterV2 only)
       const usdtConversion = await this.getUSDTConversionPrice();
       if (usdtConversion) {
-        this.logger.info(`WHYPE/UBTC via USDT conversion: ${usdtConversion.toFixed(8)}`);
+        this.logger.info(`✅ WHYPE/UBTC via QuoterV2 USDT conversion: ${usdtConversion.toFixed(8)}`);
         return usdtConversion;
       }
 
-      // 3. Try HYPE/USD WebSocket + BTC/USD conversion
-      const hybridPrice = await this.getHybridConversionPrice();
-      if (hybridPrice) {
-        this.logger.info(`WHYPE/UBTC via hybrid conversion: ${hybridPrice.toFixed(8)}`);
-        return hybridPrice;
-      }
+      // Note: WebSocket is NOT used for WHYPE/UBTC prices - only QuoterV2 on-chain contracts
+      // WebSocket is only for BTC/USD and HYPE/USD reference prices for USD validation
 
-      // 4. Fallback to reasonable estimate
-      this.logger.warn('All price sources failed, using fallback estimate');
+      // 3. Fallback to reasonable estimate (only if all QuoterV2 methods fail)
+      this.logger.warn('All QuoterV2 price sources failed, using fallback estimate');
       // Calculate fallback price from configuration if available
       const fallbackPrice = this.config?.gridTrading?.fallbackPrice || 0.0004;
       this.logger.warn(`Using fallback price: ${fallbackPrice}`);
@@ -109,7 +112,8 @@ class HybridPricingService {
         whypeAddress,
         ubtcAddress,
         oneWhype,
-        3000 // 0.3% fee
+        3000, // 0.3% fee
+        true  // forceFresh = true for real-time trading
       );
 
       if (!quote) {
@@ -136,7 +140,8 @@ class HybridPricingService {
         '0x5555555555555555555555555555555555555555', // WHYPE placeholder
         '0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb', // USDT0
         oneWhype,
-        500 // 0.05% fee
+        500, // 0.05% fee
+        true // forceFresh = true for real-time trading
       );
 
       if (!whypeUsdtQuote || whypeUsdtQuote.source.includes('MOCK')) {
@@ -148,7 +153,8 @@ class HybridPricingService {
         '0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb', // USDT0
         '0x9fdbda0a5e284c32744d2f17ee5c74b284993463', // UBTC
         oneUsdt,
-        500 // 0.05% fee
+        500, // 0.05% fee
+        true // forceFresh = true for real-time trading
       );
 
       if (!usdtUbtcQuote || usdtUbtcQuote.source.includes('MOCK')) {
@@ -167,8 +173,15 @@ class HybridPricingService {
   }
 
   /**
-   * Get WHYPE/UBTC price via HYPE/USD WebSocket + BTC/USD conversion
+   * DEPRECATED: Get WHYPE/UBTC price via HYPE/USD WebSocket + BTC/USD conversion
+   *
+   * NOTE: This method is INCORRECT for WHYPE/UBTC pricing.
+   * WHYPE/UBTC prices are ONLY available through QuoterV2 on-chain contracts.
+   * WebSocket is only for BTC/USD and HYPE/USD reference prices for USD validation.
+   *
+   * This method is kept for reference but should NOT be used.
    */
+  /*
   private async getHybridConversionPrice(): Promise<number | null> {
     try {
       // Get HYPE/USD from WebSocket
@@ -179,7 +192,7 @@ class HybridPricingService {
 
       // Update conversion rates if needed
       await this.updateConversionRates();
-      
+
       if (!this.conversionRates) {
         return null;
       }
@@ -187,7 +200,7 @@ class HybridPricingService {
       // Calculate WHYPE/UBTC = (HYPE/USD) / (BTC/USD)
       // Note: WHYPE = HYPE (1:1 wrapped token)
       const whypeUbtcPrice = hypePrice.price / this.conversionRates.btcUsd;
-      
+
       this.logger.debug('Hybrid price calculation', {
         hypeUsd: hypePrice.price,
         btcUsd: this.conversionRates.btcUsd,
@@ -200,33 +213,14 @@ class HybridPricingService {
       return null;
     }
   }
+  */
 
   /**
-   * Update BTC/USD conversion rates from external source
+   * REMOVED: updateConversionRates method
+   *
+   * This method was used for WebSocket-based WHYPE/UBTC price calculation,
+   * which is incorrect. WHYPE/UBTC prices come from QuoterV2 on-chain only.
    */
-  private async updateConversionRates(): Promise<void> {
-    try {
-      // Check if rates are still fresh
-      if (this.conversionRates && 
-          Date.now() - this.conversionRates.lastUpdate < this.cacheExpiryMs) {
-        return;
-      }
-
-      // In production, this would fetch from a reliable price API
-      // Get prices from configuration or use reasonable defaults
-      const defaultPrices = this.config?.defaultPrices || {};
-
-      this.conversionRates = {
-        btcUsd: defaultPrices.btcUsd || 118000, // ~$118k BTC (configurable)
-        hypeUsd: defaultPrices.hypeUsd || 47.2,  // ~$47.2 HYPE (configurable)
-        lastUpdate: Date.now()
-      };
-
-      this.logger.debug('Updated conversion rates', this.conversionRates);
-    } catch (error) {
-      this.logger.error('Failed to update conversion rates:', error);
-    }
-  }
 
   /**
    * Get price quote with source information

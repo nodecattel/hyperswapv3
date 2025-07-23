@@ -203,6 +203,27 @@ class HyperLiquidWebSocketService extends EventEmitter {
         }
       }
 
+      // Process BTC price specifically (this is what we need for UBTC USD conversion)
+      if (priceData['BTC']) {
+        const btcPrice = parseFloat(priceData['BTC']);
+
+        if (!isNaN(btcPrice) && btcPrice > 0) {
+          const priceInfo: PriceData = {
+            price: btcPrice,
+            timestamp: this.lastUpdate,
+            source: 'WebSocket'
+          };
+
+          this.prices.set('BTC', priceInfo);
+          this.emit('btcPrice', priceInfo);
+
+          // Only log significant price changes to reduce noise
+          this.logSignificantPriceChange('BTC', btcPrice);
+        } else {
+          this.logger.warn(`Invalid BTC price received: ${priceData['BTC']}`);
+        }
+      }
+
       // Store all other prices for potential future use
       for (const [symbol, priceStr] of Object.entries(priceData)) {
         if (symbol !== 'HYPE' && typeof priceStr === 'string') {
@@ -370,6 +391,26 @@ class HyperLiquidWebSocketService extends EventEmitter {
    */
   public hasRecentHypePrice(): boolean {
     const priceData = this.prices.get('HYPE');
+    if (!priceData) return false;
+
+    const age = Date.now() - priceData.timestamp;
+    return age < 60000; // 60 seconds
+  }
+
+  /**
+   * Get the latest BTC/USD price specifically
+   */
+  public getBtcUsdPrice(): number | null {
+    const priceData = this.prices.get('BTC');
+    this.logger.info(`🔍 DEBUG: getBtcUsdPrice() - Map size: ${this.prices.size}, Keys: ${Array.from(this.prices.keys())}, BTC data: ${priceData ? priceData.price : 'null'}`);
+    return priceData ? priceData.price : null;
+  }
+
+  /**
+   * Check if we have recent BTC price data (within last 60 seconds)
+   */
+  public hasRecentBtcPrice(): boolean {
+    const priceData = this.prices.get('BTC');
     if (!priceData) return false;
 
     const age = Date.now() - priceData.timestamp;

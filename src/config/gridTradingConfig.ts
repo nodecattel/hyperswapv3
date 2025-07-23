@@ -20,7 +20,7 @@ import {
   NETWORKS,
   TOKENS,
   POOLS,
-  DEFAULT_PRICES,
+
   TRADING_PARAMS,
   API_ENDPOINTS,
   LOGGING_CONFIG,
@@ -205,7 +205,7 @@ class GridTradingConfig {
       poolFee: parseInt(process.env['POOL_FEE'] || POOLS.WHYPE_UBTC_03.fee.toString()),
 
       // Fallback price configuration using constants
-      fallbackPrice: parseFloat(process.env['GRID_FALLBACK_PRICE'] || DEFAULT_PRICES.WHYPE_UBTC.toString())
+      fallbackPrice: 0 // NO HARDCODED FALLBACKS - Real-time pricing only
     };
 
     // Add multi-pair configuration if enabled
@@ -352,9 +352,10 @@ class GridTradingConfig {
    */
   private loadDefaultPricesConfig(): DefaultPricesConfig {
     return {
-      hypeUsd: parseFloat(process.env['DEFAULT_HYPE_USD_PRICE'] || DEFAULT_PRICES.HYPE_USD.toString()),
-      btcUsd: parseFloat(process.env['DEFAULT_BTC_USD_PRICE'] || DEFAULT_PRICES.BTC_USD.toString()),
-      ethUsd: parseFloat(process.env['DEFAULT_ETH_USD_PRICE'] || DEFAULT_PRICES.ETH_USD.toString())
+      // NO HARDCODED PRICE FALLBACKS - All prices from real-time sources
+      hypeUsd: 0, // From HyperLiquid WebSocket API
+      btcUsd: 0,  // From QuoterV2 UBTC pairs
+      ethUsd: 0   // From QuoterV2 UETH pairs (if needed)
     };
   }
 

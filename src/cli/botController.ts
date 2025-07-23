@@ -105,7 +105,12 @@ class BotController {
         console.log(chalk.cyan(`📊 Single-Pair Mode: ${config.gridTrading.baseToken}/${config.gridTrading.quoteToken} with $${config.gridTrading.totalInvestment} investment`));
       }
 
-      const gridBot = new GridBot(config, provider, signer, onChainPriceService);
+      // Ensure WebSocket service is available for GridBot
+      if (!wsService) {
+        throw new Error('WebSocket service is required for GridBot operation');
+      }
+
+      const gridBot = new GridBot(config, provider, signer, onChainPriceService, wsService);
 
       // Set dry run mode if specified
       if (options.dryRun || config.safety.dryRun) {

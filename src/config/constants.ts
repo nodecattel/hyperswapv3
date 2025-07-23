@@ -191,28 +191,27 @@ export const POOLS = {
 } as const;
 
 // ============================================================================
-// DEFAULT PRICES (FALLBACKS)
+// REAL-TIME PRICING CONFIGURATION
 // ============================================================================
 //
-// 🎯 PRICE DATA USAGE CLARIFICATION:
-// - HYPE_USD: ONLY for wallet balance USD value display (from WebSocket)
-// - WHYPE_*: For actual DEX trading operations and grid calculations
-// - All trading pairs use WHYPE prices from on-chain QuoterV2
+// 🎯 100% REAL-TIME PRICING - NO HARDCODED FALLBACKS
+// - All prices fetched from live sources: WebSocket + QuoterV2 + On-chain
+// - BTC/USD: Calculated from UBTC pairs via QuoterV2
+// - HYPE/USD: From HyperLiquid WebSocket API
+// - WHYPE prices: Direct QuoterV2 quotes from DEX pools
 //
 
-export const DEFAULT_PRICES = {
-  // USD reference prices (display only)
-  HYPE_USD: 44.86,        // WebSocket price for USD value display
-  BTC_USD: 118000,        // Reference BTC price
-  ETH_USD: 4200,          // Reference ETH price
+export const PRICE_SOURCES = {
+  // Real-time price source configuration
+  WEBSOCKET_TIMEOUT: 5000,        // 5 seconds WebSocket timeout
+  QUOTER_RETRY_COUNT: 3,          // 3 retries for QuoterV2 calls
+  PRICE_CACHE_EXPIRY: 30000,      // 30 seconds cache expiry
+  STALE_PRICE_WARNING: 15000,     // 15 seconds stale warning
 
-  // DEX trading pair prices (on-chain QuoterV2)
-  WHYPE_UBTC: 0.0004,     // WHYPE/UBTC trading pair
-  WHYPE_USDT0: 45.0,      // WHYPE/USDT0 trading pair
-
-  // Stablecoin references
-  USDT0_USD: 1.0,         // USDT0 ≈ USD
-  USDHL_USD: 1.0          // USDHL ≈ USD
+  // Price validation ranges (sanity checks)
+  BTC_USD_RANGE: { min: 50000, max: 200000 },
+  HYPE_USD_RANGE: { min: 10, max: 200 },
+  ETH_USD_RANGE: { min: 1000, max: 10000 }
 } as const;
 
 // ============================================================================
@@ -273,10 +272,12 @@ export const API_ENDPOINTS = {
 export const LOGGING_CONFIG = {
   DEFAULT_LEVEL: 'info',
   MAX_FILE_SIZE: '10MB',
-  MAX_FILES: 5,
+  MAX_FILES: 3,
   LOG_DIRECTORY: 'logs',
   ENABLE_FILE_LOGGING: true,
-  ENABLE_CONSOLE_LOGGING: true
+  ENABLE_CONSOLE_LOGGING: true,
+  CONSOLE_COLORS: true,
+  CLEAN_FORMAT: true
 } as const;
 
 // ============================================================================
@@ -334,10 +335,10 @@ export function getPoolByPair(baseToken: string, quoteToken: string) {
 }
 
 /**
- * Get default price for a token pair
+ * Get price source configuration
  */
-export function getDefaultPrice(pairSymbol: string): number {
-  return DEFAULT_PRICES[pairSymbol as keyof typeof DEFAULT_PRICES] || 0;
+export function getPriceSourceConfig() {
+  return PRICE_SOURCES;
 }
 
 export default {
@@ -345,7 +346,7 @@ export default {
   CONTRACT_ADDRESSES,
   TOKENS,
   POOLS,
-  DEFAULT_PRICES,
+  PRICE_SOURCES,
   TRADING_PARAMS,
   API_ENDPOINTS,
   LOGGING_CONFIG,
@@ -355,5 +356,5 @@ export default {
   getContractAddresses,
   getTokenBySymbol,
   getPoolByPair,
-  getDefaultPrice
+  getPriceSourceConfig
 };

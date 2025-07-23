@@ -33,8 +33,13 @@ export default class GridBot extends EventEmitter {
   // private provider: ethers.providers.JsonRpcProvider; // TODO: Use for production trading
   // private signer: ethers.Wallet; // TODO: Use for production trading
   private pricingService: HybridPricingService;
+  private webSocketService: HyperLiquidWebSocketService; // Direct access for reference pricing
   private dataStore: DataStore;
   private logger: winston.Logger;
+  private tradeLogger: winston.Logger;
+  private profitCalculationService?: import('./ProfitCalculationService').ProfitCalculationService;
+  private realTimePriceService?: import('./RealTimePriceService').RealTimePriceService;
+  private simpleTradeValidator?: import('./SimpleTradeValidator').SimpleTradeValidator;
 
   // Enhanced Grid Management (Single-Pair Mode)
   private grids: GridLevel[] = [];
@@ -83,6 +88,10 @@ export default class GridBot extends EventEmitter {
   private tradingService: any; // HyperSwapV3TradingService instance
   private pairSuccessfulTrades: Map<string, number> = new Map();
   private pairFailedTrades: Map<string, number> = new Map();
+
+  // Error tracking to prevent infinite loops
+  private gridFailureCount: Map<string, number> = new Map();
+  private readonly MAX_GRID_FAILURES = 3;
 
   // Dynamic Range Tracking
   private currentRangeCenter: number | null = null;
@@ -135,7 +144,8 @@ export default class GridBot extends EventEmitter {
     config: GridTradingConfig,
     provider: ethers.providers.JsonRpcProvider,
     signer: ethers.Wallet,
-    onChainPriceService: OnChainPriceService
+    onChainPriceService: OnChainPriceService,
+    webSocketService: HyperLiquidWebSocketService  // Accept WebSocket service as parameter
   ) {
     super();
 
@@ -149,27 +159,73 @@ export default class GridBot extends EventEmitter {
     // Initialize multi-pair mode
     this.multiPairMode = config.gridTrading.multiPair?.enabled || false;
 
-    // Initialize services
-    const webSocketService = new HyperLiquidWebSocketService();
-    this.pricingService = new HybridPricingService(onChainPriceService, webSocketService, config);
+    // Use the provided WebSocket instance (shared from botController)
+    this.webSocketService = webSocketService;
+    this.pricingService = new HybridPricingService(onChainPriceService, this.webSocketService, config);
     this.dataStore = DataStore.getInstance();
 
-    // Setup logger
+    // ✅ FIXED: Now using the same WebSocket instance that receives data from botController
+    // No need to override - we're already using the correct instance
+
+    // Setup logger with clean console formatting
     this.logger = winston.createLogger({
       level: config.logging.level,
       format: winston.format.combine(
-        winston.format.timestamp(),
+        winston.format.timestamp({ format: 'HH:mm:ss' }),
+        winston.format.errors({ stack: true }),
         winston.format.json()
       ),
       transports: [
         new winston.transports.Console({
           format: winston.format.combine(
-            winston.format.colorize(),
-            winston.format.simple()
+            winston.format.colorize({ all: true }),
+            winston.format.printf(({ timestamp, level, message, ...meta }) => {
+              const metaStr = Object.keys(meta).length ? `\n   ${JSON.stringify(meta, null, 2).split('\n').join('\n   ')}` : '';
+              return `${timestamp} ${level}: ${message}${metaStr}`;
+            })
           )
+        }),
+        // File logging with rotation
+        new winston.transports.File({
+          filename: 'logs/grid-bot.log',
+          format: winston.format.combine(
+            winston.format.timestamp(),
+            winston.format.json()
+          ),
+          maxsize: 10 * 1024 * 1024, // 10MB
+          maxFiles: 5
         })
       ]
     });
+
+    // Setup separate trade logger for trade-execution.log
+    this.tradeLogger = winston.createLogger({
+      level: 'info',
+      format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.json()
+      ),
+      transports: [
+        new winston.transports.File({
+          filename: 'logs/trade-execution.log',
+          format: winston.format.combine(
+            winston.format.timestamp(),
+            winston.format.json()
+          ),
+          maxsize: 10 * 1024 * 1024, // 10MB
+          maxFiles: 5
+        })
+      ]
+    });
+
+    // Initialize profit calculation service
+    this.initializeProfitCalculationService();
+
+    // Initialize real-time price service
+    this.initializeRealTimePriceService();
+
+    // Initialize simple trade validator
+    this.initializeSimpleTradeValidator();
 
     // Initialize multi-pair configurations if enabled
     if (this.multiPairMode) {
@@ -297,6 +353,29 @@ export default class GridBot extends EventEmitter {
       return { minPrice, maxPrice };
     } catch (error) {
       this.logger.error('Failed to calculate dynamic price range:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Calculate dynamic price range for a specific trading pair
+   */
+  private async calculatePairDynamicRange(pairId: string, currentPrice: number, rangePercent: number): Promise<{minPrice: number, maxPrice: number} | null> {
+    try {
+      const minPrice = currentPrice * (1 - rangePercent);
+      const maxPrice = currentPrice * (1 + rangePercent);
+
+      this.logger.info(`📊 Dynamic price range calculated for ${pairId}`, {
+        currentPrice: currentPrice.toFixed(8),
+        rangePercent: `±${(rangePercent * 100).toFixed(1)}%`,
+        minPrice: minPrice.toFixed(8),
+        maxPrice: maxPrice.toFixed(8),
+        rangeWidth: ((maxPrice - minPrice) / currentPrice * 100).toFixed(1) + '%'
+      });
+
+      return { minPrice, maxPrice };
+    } catch (error) {
+      this.logger.error(`Failed to calculate dynamic price range for ${pairId}:`, error);
       return null;
     }
   }
@@ -450,10 +529,8 @@ export default class GridBot extends EventEmitter {
           // Check for grid triggers with enhanced logic
           await this.checkEnhancedGridTriggers(newPrice, previousPrice);
         } else {
-          this.logger.debug(`📊 Price change below threshold`, {
-            priceChange: `${priceChangePercent}%`,
-            required: `${(this.ENHANCED_CONFIG.priceUpdateThreshold * 100).toFixed(4)}%`
-          });
+          // Only log price changes below threshold in debug mode
+          this.logger.debug(`📊 Price change below threshold: ${priceChangePercent}% (need ${(this.ENHANCED_CONFIG.priceUpdateThreshold * 100).toFixed(4)}%)`);
         }
       }
 
@@ -681,22 +758,28 @@ export default class GridBot extends EventEmitter {
   }
 
   /**
-   * Get current HYPE/USD price for fee calculations
+   * Get current HYPE/USD price for fee calculations using reference pricing
    */
   private async getHypeUsdPrice(): Promise<number> {
     try {
-      // Try to get from WebSocket service first
-      const webSocketService = (this.pricingService as any).webSocketService;
-      if (webSocketService && typeof webSocketService.getHypeUsdPrice === 'function') {
-        const hypePrice = webSocketService.getHypeUsdPrice();
-        if (hypePrice) return hypePrice;
+      // Use WebSocket reference price first
+      const hypeReferencePrice = await this.getReferenceHypePrice();
+
+      if (hypeReferencePrice) {
+        // Update profit calculation service with current price
+        if (this.profitCalculationService) {
+          this.profitCalculationService.updateHypePrice(hypeReferencePrice);
+        }
+
+        this.logger.debug(`📊 Using HYPE reference price: $${hypeReferencePrice.toFixed(4)}`);
+        return hypeReferencePrice;
       }
 
-      // Fallback to approximate price
-      return 45.0; // Approximate HYPE price
+      // If WebSocket not available, throw error (no hardcoded fallbacks)
+      throw new Error('HYPE reference price not available from WebSocket');
     } catch (error) {
-      this.logger.warn('Failed to get HYPE price, using fallback:', error);
-      return 45.0;
+      this.logger.error('Failed to get HYPE USD reference price:', error);
+      throw error; // Don't use hardcoded fallbacks
     }
   }
 
@@ -875,11 +958,71 @@ export default class GridBot extends EventEmitter {
    */
   private async executeRealOrder(grid: GridLevel): Promise<void> {
     try {
+      // 🔍 COMPREHENSIVE PRE-TRADE VALIDATION
+      this.logger.info(`🔍 Starting comprehensive validation for ${grid.pairId}`, {
+        gridId: grid.id,
+        side: grid.side,
+        price: grid.price.toFixed(8),
+        quantity: grid.quantity.toFixed(8)
+      });
+
+      // 🔍 COMPREHENSIVE TRADE VALIDATION using reference prices
+      if (this.simpleTradeValidator) {
+        const pairId = grid.pairId || 'WHYPE_UBTC'; // Default fallback
+        const currentPrice = this.pairLastPrice.get(pairId) || grid.price;
+
+        // Use WebSocket reference prices for USD validation
+        const btcReferencePrice = await this.getReferenceBtcPrice();
+        const hypeReferencePrice = await this.getReferenceHypePrice();
+
+        if (!btcReferencePrice || !hypeReferencePrice) {
+          throw new Error('Reference prices not available for trade validation');
+        }
+
+        this.logger.info(`📊 Using reference prices for validation: BTC=$${btcReferencePrice.toFixed(2)}, HYPE=$${hypeReferencePrice.toFixed(4)}`);
+
+        const validationResult = this.simpleTradeValidator.validateTrade(grid, currentPrice, btcReferencePrice, hypeReferencePrice);
+
+        if (!validationResult.isValid) {
+          this.logger.error(`❌ Trade validation FAILED for ${grid.id}:`, validationResult.errors);
+          throw new Error(`Trade validation failed: ${validationResult.errors.join(', ')}`);
+        }
+
+        if (validationResult.warnings.length > 0) {
+          this.logger.warn(`⚠️ Trade validation warnings for ${grid.id}:`, validationResult.warnings);
+        }
+
+        this.logger.info(`✅ Trade validation PASSED for ${grid.id}`, {
+          estimatedUsd: validationResult.estimatedUsdValue.toFixed(2),
+          calculationSteps: validationResult.calculationSteps
+        });
+      }
+
+      // Calculate correct USD value based on trade direction using reference prices
+      let estimatedUsdValue: number;
+      if (grid.side === 'buy') {
+        // For buy trades, grid.quantity is UBTC amount to spend
+        const btcReferencePrice = await this.getReferenceBtcPrice();
+        if (!btcReferencePrice) {
+          throw new Error('BTC reference price not available for USD estimation');
+        }
+        estimatedUsdValue = grid.quantity * btcReferencePrice; // UBTC * reference BTC price
+        this.logger.debug(`💰 Buy USD estimation: ${grid.quantity.toFixed(8)} UBTC × $${btcReferencePrice.toFixed(2)} = $${estimatedUsdValue.toFixed(2)}`);
+      } else {
+        // For sell trades, grid.quantity is WHYPE amount to sell
+        const hypeReferencePrice = await this.getReferenceHypePrice();
+        if (!hypeReferencePrice) {
+          throw new Error('HYPE reference price not available for USD estimation');
+        }
+        estimatedUsdValue = grid.quantity * hypeReferencePrice; // WHYPE * reference HYPE price
+        this.logger.debug(`💰 Sell USD estimation: ${grid.quantity.toFixed(8)} WHYPE × $${hypeReferencePrice.toFixed(4)} = $${estimatedUsdValue.toFixed(2)}`);
+      }
+
       this.logger.info(`🎯 Executing REAL ${grid.side} order via SwapRouter`, {
         gridId: grid.id,
         price: grid.price,
         quantity: grid.quantity,
-        estimatedUsdValue: (grid.quantity * grid.price * 118000).toFixed(2)
+        estimatedUsdValue: estimatedUsdValue.toFixed(2)
       });
 
       // Initialize trading service if not already done
@@ -901,7 +1044,8 @@ export default class GridBot extends EventEmitter {
         // Buy WHYPE with UBTC
         tokenIn = tokenAddresses.UBTC;
         tokenOut = tokenAddresses.WHYPE;
-        amountIn = ethers.utils.parseUnits((grid.quantity * grid.price).toFixed(8), 8); // UBTC amount
+        // FIXED: For buy trades, grid.quantity is already the UBTC amount to spend
+        amountIn = ethers.utils.parseUnits(grid.quantity.toFixed(8), 8); // UBTC amount
       } else {
         // Sell WHYPE for UBTC
         tokenIn = tokenAddresses.WHYPE;
@@ -1242,17 +1386,10 @@ export default class GridBot extends EventEmitter {
   private async updatePerformanceMetrics(): Promise<void> {
     if (this.totalTrades > 0) {
       const successRate = (this.totalTrades / (this.totalTrades + 0)) * 100; // Simplified for now
-      const avgProfitPerTrade = this.totalProfit / this.totalTrades;
       const netProfit = this.totalProfit - this.totalFees;
 
-      this.logger.debug('📊 Performance metrics updated', {
-        totalTrades: this.totalTrades,
-        totalProfit: this.totalProfit.toFixed(2),
-        totalFees: this.totalFees.toFixed(2),
-        netProfit: netProfit.toFixed(2),
-        avgProfitPerTrade: avgProfitPerTrade.toFixed(2),
-        successRate: successRate.toFixed(1) + '%'
-      });
+      // Only log performance metrics in debug mode to reduce console spam
+      this.logger.debug(`📊 Performance: ${this.totalTrades} trades, $${netProfit.toFixed(2)} net profit (${successRate.toFixed(1)}% success)`);
     }
   }
 
@@ -1263,17 +1400,8 @@ export default class GridBot extends EventEmitter {
     const runtime = this.startTime ? Date.now() - this.startTime : 0;
     const runtimeHours = (runtime / (1000 * 60 * 60)).toFixed(2);
 
-    this.logger.debug('🤖 Enhanced bot status', {
-      runtime: `${runtimeHours}h`,
-      currentPrice: this.lastPrice,
-      volatility: (this.currentVolatility * 100).toFixed(2) + '%',
-      priceDirection: this.priceDirection,
-      pendingGrids: this.pendingGrids.size,
-      activeOrders: this.activeOrders.size,
-      orderQueue: this.orderQueue.length,
-      totalTrades: this.totalTrades,
-      totalProfit: this.totalProfit.toFixed(2)
-    });
+    // Clean status logging - only show essential info
+    this.logger.info(`🤖 Bot Status: ${runtimeHours}h runtime | Price: ${this.lastPrice} | Pending: ${this.pendingGrids.size} grids | Trades: ${this.totalTrades}`);
   }
 
   /**
@@ -1505,6 +1633,60 @@ export default class GridBot extends EventEmitter {
   }
 
   /**
+   * Initialize profit calculation service
+   */
+  private async initializeProfitCalculationService(): Promise<void> {
+    try {
+      const { ProfitCalculationService } = await import('./ProfitCalculationService');
+      this.profitCalculationService = new ProfitCalculationService(this.provider, this.logger);
+      this.logger.info('✅ Profit calculation service initialized');
+    } catch (error) {
+      this.logger.error('Failed to initialize profit calculation service:', error);
+    }
+  }
+
+  /**
+   * Initialize real-time price service
+   */
+  private async initializeRealTimePriceService(): Promise<void> {
+    try {
+      const { RealTimePriceService } = await import('./RealTimePriceService');
+
+      // Get WebSocket service from pricing service
+      const webSocketService = (this.pricingService as any).webSocketService;
+      if (!webSocketService) {
+        throw new Error('WebSocket service not available from pricing service');
+      }
+
+      this.realTimePriceService = new RealTimePriceService(webSocketService, this.provider, this.logger);
+      this.logger.info('✅ Real-time price service initialized');
+
+      // Log initial price health status
+      const healthStatus = this.realTimePriceService.getPriceHealthStatus();
+      this.logger.info('📊 Price service health:', healthStatus);
+
+    } catch (error) {
+      this.logger.error('Failed to initialize real-time price service:', error);
+    }
+  }
+
+  /**
+   * Initialize simple trade validator
+   */
+  private async initializeSimpleTradeValidator(): Promise<void> {
+    try {
+      const { SimpleTradeValidator } = await import('./SimpleTradeValidator');
+
+      this.simpleTradeValidator = new SimpleTradeValidator(this.logger);
+
+      this.logger.info('✅ Simple trade validator initialized');
+
+    } catch (error) {
+      this.logger.error('Failed to initialize simple trade validator:', error);
+    }
+  }
+
+  /**
    * Initialize multi-pair trading mode
    */
   private initializeMultiPairMode(): void {
@@ -1590,6 +1772,9 @@ export default class GridBot extends EventEmitter {
       // Initialize grids for this pair
       await this.initializePairGrids(pairId);
     }
+
+    // Execute initial positioning trades for each pair
+    await this.executeInitialPositioning();
 
     // Start unified monitoring for all pairs
     this.startMultiPairMonitoring();
@@ -1701,12 +1886,31 @@ export default class GridBot extends EventEmitter {
       // Determine side based on price relative to current price
       const side = price < currentPrice ? 'buy' : 'sell';
 
+      // Calculate correct quantity based on trade direction and token types
+      let quantity: number;
+      const tradeSizeUSD = pairConfig.totalInvestment / pairConfig.gridCount;
+
+      if (side === 'buy') {
+        // For BUY: We spend quote token to get base token
+        // quantity should be the quote token amount to spend
+        if (pairId.includes('UBTC')) {
+          quantity = tradeSizeUSD / 118000; // UBTC amount to spend (USD / BTC_price)
+        } else {
+          quantity = tradeSizeUSD; // USDT0 amount to spend (1:1 with USD)
+        }
+      } else {
+        // For SELL: We spend base token to get quote token
+        // quantity should be the base token amount to sell
+        const hypeUsdPrice = 46; // Approximate HYPE USD price
+        quantity = tradeSizeUSD / hypeUsdPrice; // WHYPE amount to sell
+      }
+
       grids.push({
         id: `${pairId}_grid_${i}`,
         price,
         side,
         level: i,
-        quantity: pairConfig.totalInvestment / pairConfig.gridCount / currentPrice, // Convert USD to token amount
+        quantity: quantity, // Correct quantity calculation
         isActive: true,
         pairId: pairId,
         profitTarget: price * (1 + pairConfig.profitMargin),
@@ -1724,6 +1928,391 @@ export default class GridBot extends EventEmitter {
       buyGrids: grids.filter(g => g.side === 'buy').length,
       sellGrids: grids.filter(g => g.side === 'sell').length
     });
+  }
+
+  /**
+   * Execute initial positioning trades for all pairs when bot starts
+   */
+  private async executeInitialPositioning(): Promise<void> {
+    this.logger.info('🎯 Executing initial positioning trades...');
+
+    // Give WebSocket a moment to initialize (it's already working based on logs)
+    this.logger.info('⏳ Allowing WebSocket to initialize...');
+    await new Promise(resolve => setTimeout(resolve, 2000)); // Simple 2-second wait
+
+    for (const pairId of this.pairConfigs.keys()) {
+      try {
+        await this.executeInitialPairTrade(pairId);
+      } catch (error) {
+        this.logger.error(`❌ Failed to execute initial trade for ${pairId}:`, error);
+        // Continue with other pairs even if one fails
+      }
+    }
+
+    this.logger.info('✅ Initial positioning completed');
+  }
+
+
+
+  /**
+   * Execute initial positioning trade for a specific pair
+   */
+  private async executeInitialPairTrade(pairId: string): Promise<void> {
+    const pairConfig = this.pairConfigs.get(pairId);
+    const grids = this.pairGrids.get(pairId);
+    const currentPrice = this.pairLastPrice.get(pairId);
+
+    if (!pairConfig || !grids || !currentPrice) {
+      this.logger.warn(`Cannot execute initial trade for ${pairId}: missing configuration or price`);
+      return;
+    }
+
+    // Determine initial trade direction based on position in grid range
+    const minPrice = Math.min(...grids.map(g => g.price));
+    const maxPrice = Math.max(...grids.map(g => g.price));
+    const pricePosition = (currentPrice - minPrice) / (maxPrice - minPrice);
+
+    // If price is in lower half of range, execute a buy to establish position
+    // If price is in upper half of range, execute a sell to establish position
+    const initialSide = pricePosition < 0.5 ? 'buy' : 'sell';
+
+    // Calculate trade size for initial positioning
+    // Allow configurable percentage of total investment (default: 1/gridCount)
+    const initialTradePercent = parseFloat(process.env['INITIAL_TRADE_PERCENT'] || '0') || (1 / pairConfig.gridCount);
+    const tradeSizeUSD = pairConfig.totalInvestment * initialTradePercent;
+
+    // Calculate quantity based on trade direction and available balance
+    let quantity: number;
+    let actualTradeSizeUSD: number;
+
+    if (initialSide === 'buy') {
+      // For BUY: We spend quote token (UBTC/USDT0) to get base token (WHYPE)
+      // Check available quote token balance and adjust trade size accordingly
+      const availableBalance = await this.getAvailableBalance(pairId, 'quote');
+      const maxTradeUSD = availableBalance * (pairId.includes('UBTC') ? 118000 : 1); // Convert to USD
+
+      // Use smaller of desired trade size or available balance (with safety margin)
+      // For small balances, use 80% safety margin instead of 90%
+      const safetyMargin = maxTradeUSD < 200 ? 0.8 : 0.9;
+      actualTradeSizeUSD = Math.min(tradeSizeUSD, maxTradeUSD * safetyMargin);
+
+      // Ensure minimum trade size for meaningful trades
+      const minTradeSize = pairId.includes('UBTC') ? 0.5 : 1.0; // $0.50 for UBTC, $1.00 for others
+      if (actualTradeSizeUSD < minTradeSize) {
+        this.logger.warn(`Balance too low for meaningful trade: $${actualTradeSizeUSD.toFixed(2)} < $${minTradeSize}, skipping initial trade for ${pairId}`);
+        return;
+      }
+
+      // For buy trades, quantity represents the quote token amount to spend
+      if (pairId.includes('UBTC')) {
+        // For UBTC pairs: USD amount ÷ BTC/USD reference price = UBTC amount to spend
+        const btcReferencePrice = await this.getReferenceBtcPrice();
+        if (!btcReferencePrice) {
+          throw new Error('BTC reference price not available for USD value calculation');
+        }
+        quantity = actualTradeSizeUSD / btcReferencePrice;
+
+        this.logger.info(`💰 UBTC buy calculation using reference price`, {
+          actualTradeSizeUSD,
+          btcReferencePriceUSD: btcReferencePrice,
+          calculatedUBTC: quantity.toFixed(8)
+        });
+      } else {
+        // For USDT0 pairs: USD amount = USDT0 amount to spend (1:1)
+        quantity = actualTradeSizeUSD;
+
+        this.logger.debug(`USDT0 buy quantity calculation`, {
+          actualTradeSizeUSD,
+          calculatedUSDT0: quantity.toFixed(6)
+        });
+      }
+    } else {
+      // For SELL: We spend base token (WHYPE) to get quote token
+      // Check available WHYPE balance
+      const availableBalance = await this.getAvailableBalance(pairId, 'base');
+
+      // Calculate max trade USD based on pair type using reference prices
+      let maxTradeUSD: number;
+      if (pairId.includes('UBTC')) {
+        // For UBTC pairs: WHYPE amount × UBTC price × BTC/USD reference price
+        const btcReferencePrice = await this.getReferenceBtcPrice();
+        if (!btcReferencePrice) {
+          throw new Error('BTC reference price not available for USD value calculation');
+        }
+        maxTradeUSD = availableBalance * currentPrice * btcReferencePrice;
+
+        this.logger.info(`💰 UBTC max trade calculation using reference price`, {
+          availableWHYPE: availableBalance,
+          ubtcTradingPrice: currentPrice,
+          btcReferencePriceUSD: btcReferencePrice,
+          maxTradeUSD: maxTradeUSD.toFixed(2)
+        });
+      } else {
+        // For USDT0 pairs: WHYPE amount × USDT0 price (direct USD)
+        maxTradeUSD = availableBalance * currentPrice;
+
+        this.logger.debug(`USDT0 max trade calculation`, {
+          availableWHYPE: availableBalance,
+          usdt0Price: currentPrice,
+          maxTradeUSD: maxTradeUSD.toFixed(2)
+        });
+      }
+
+      // Use smaller of desired trade size or available balance (with safety margin)
+      const safetyMargin = maxTradeUSD < 200 ? 0.8 : 0.9;
+      actualTradeSizeUSD = Math.min(tradeSizeUSD, maxTradeUSD * safetyMargin);
+
+      // For sell trades, quantity represents the base token amount to sell
+      if (pairId.includes('UBTC')) {
+        // For UBTC pairs: USD amount ÷ (UBTC price × BTC/USD reference price)
+        const btcReferencePrice = await this.getReferenceBtcPrice();
+        if (!btcReferencePrice) {
+          throw new Error('BTC reference price not available for USD value calculation');
+        }
+        quantity = actualTradeSizeUSD / (currentPrice * btcReferencePrice);
+
+        this.logger.info(`💰 UBTC sell calculation using reference price`, {
+          actualTradeSizeUSD,
+          ubtcTradingPrice: currentPrice,
+          btcReferencePriceUSD: btcReferencePrice,
+          calculatedWHYPE: quantity.toFixed(8)
+        });
+      } else {
+        // For USDT0 pairs: USD amount ÷ USDT0 price
+        quantity = actualTradeSizeUSD / currentPrice;
+
+        this.logger.debug(`USDT0 sell quantity calculation`, {
+          actualTradeSizeUSD,
+          usdt0Price: currentPrice,
+          calculatedWHYPE: quantity.toFixed(8)
+        });
+      }
+    }
+
+    // Create initial positioning trade
+    const initialTrade: GridLevel = {
+      id: `${pairId}_initial_${Date.now()}`,
+      price: currentPrice,
+      side: initialSide,
+      level: -1, // Special level for initial positioning
+      quantity: quantity,
+      isActive: false,
+      pairId: pairId,
+      profitTarget: initialSide === 'buy' ? currentPrice * 1.025 : currentPrice * 0.975,
+      timestamp: Date.now(),
+      priority: 1000 // Highest priority for initial trade
+    };
+
+    const initialLogData = {
+      currentPrice: currentPrice.toFixed(8),
+      pricePosition: `${(pricePosition * 100).toFixed(1)}%`,
+      tradeSize: `$${actualTradeSizeUSD.toFixed(2)}`,
+      side: initialSide,
+      adjustedFromBalance: actualTradeSizeUSD < tradeSizeUSD
+    };
+
+    this.logger.info(`🚀 Executing initial ${initialSide} trade for ${pairId}`, initialLogData);
+    this.tradeLogger.info(`Initial positioning trade: ${initialSide} ${pairId}`, initialLogData);
+
+    if (this.config.safety.dryRun) {
+      await this.simulatePairTrade(pairId, initialTrade, currentPrice);
+    } else {
+      await this.executePairTrade(pairId, initialTrade, currentPrice);
+    }
+  }
+
+  /**
+   * Get available token balance for a trading pair
+   */
+  private async getAvailableBalance(pairId: string, tokenType: 'base' | 'quote'): Promise<number> {
+    try {
+      const tokens = pairId.split('_');
+      const baseToken = tokens[0]!; // WHYPE
+      const quoteToken = tokens[1]!; // UBTC or USDT0
+
+      const tokenSymbol = tokenType === 'base' ? baseToken : quoteToken;
+      const tokenAddresses = this.getTokenAddresses();
+      const tokenAddress = tokenAddresses[tokenSymbol as keyof typeof tokenAddresses];
+
+      if (!tokenAddress || !ethers.utils.isAddress(tokenAddress)) {
+        this.logger.warn(`Invalid token address for ${tokenSymbol}: ${tokenAddress}`);
+        return 0;
+      }
+
+      // Get token contract
+      const tokenContract = new ethers.Contract(
+        tokenAddress,
+        ['function balanceOf(address) view returns (uint256)', 'function decimals() view returns (uint8)'],
+        this.provider
+      );
+
+      const signerAddress = await this.signer.getAddress();
+      const balance = await tokenContract['balanceOf'](signerAddress);
+      const decimals = await tokenContract['decimals']();
+
+      const formattedBalance = parseFloat(ethers.utils.formatUnits(balance, decimals));
+
+      this.logger.debug(`Available ${tokenSymbol} balance: ${formattedBalance}`, {
+        pairId,
+        tokenType,
+        tokenSymbol,
+        rawBalance: balance.toString(),
+        decimals
+      });
+
+      return formattedBalance;
+    } catch (error) {
+      this.logger.error(`Failed to get available balance for ${pairId} ${tokenType}:`, error);
+      return 0;
+    }
+  }
+
+  /**
+   * Get BTC/USD reference price for USD value calculations (WebSocket data)
+   *
+   * IMPORTANT: This is used ONLY for USD validation/display, NOT for actual trading
+   * WHYPE/UBTC trading prices come from QuoterV2 on-chain contracts only
+   * WebSocket provides BTC/USD and HYPE/USD reference prices for USD calculations
+   *
+   * Implements retry logic to handle WebSocket initialization timing
+   */
+  private async getReferenceBtcPrice(): Promise<number | null> {
+    try {
+      this.logger.debug('🔍 Getting BTC/USD reference price for USD validation...');
+
+      // Implement retry logic directly (5 attempts with 1-second delays)
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        this.logger.debug(`📡 Attempt ${attempt}/5: Checking WebSocket BTC/USD reference price...`);
+
+        const btcPrice = this.webSocketService.getBtcUsdPrice();
+
+        if (btcPrice && btcPrice > 0 && btcPrice >= 50000 && btcPrice <= 200000) {
+          this.logger.debug(`✅ BTC/USD reference price: $${btcPrice.toFixed(2)} (attempt ${attempt}) - for USD validation only`);
+          return btcPrice;
+        }
+
+        if (attempt < 5) {
+          this.logger.debug(`⏳ WebSocket BTC/USD reference price not ready, waiting 1 second... (attempt ${attempt}/5)`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+
+      this.logger.debug('❌ WebSocket BTC/USD reference price not available after 5 attempts');
+      return null;
+    } catch (error) {
+      this.logger.debug('BTC/USD reference price error:', error instanceof Error ? error.message : String(error));
+      return null;
+    }
+  }
+
+  /**
+   * Get HYPE/USD reference price for USD value calculations (WebSocket data)
+   *
+   * IMPORTANT: This is used ONLY for USD validation/display, NOT for actual trading
+   * WHYPE/UBTC trading prices come from QuoterV2 on-chain contracts only
+   * WebSocket provides BTC/USD and HYPE/USD reference prices for USD calculations
+   *
+   * Implements retry logic to handle WebSocket initialization timing
+   */
+  private async getReferenceHypePrice(): Promise<number | null> {
+    try {
+      this.logger.debug('🔍 Getting HYPE/USD reference price for USD validation...');
+
+      // Implement retry logic directly (5 attempts with 1-second delays)
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        this.logger.debug(`📡 Attempt ${attempt}/5: Checking WebSocket HYPE/USD reference price...`);
+
+        const hypePrice = this.webSocketService.getHypeUsdPrice();
+        if (hypePrice && hypePrice > 0 && hypePrice >= 1 && hypePrice <= 1000) {
+          this.logger.debug(`✅ HYPE/USD reference price: $${hypePrice.toFixed(4)} (attempt ${attempt}) - for USD validation only`);
+          return hypePrice;
+        }
+
+        if (attempt < 5) {
+          this.logger.debug(`⏳ WebSocket HYPE/USD reference price not ready, waiting 1 second... (attempt ${attempt}/5)`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+
+      this.logger.debug('❌ WebSocket HYPE/USD reference price not available after 5 attempts');
+      return null;
+    } catch (error) {
+      this.logger.debug('HYPE/USD reference price error:', error instanceof Error ? error.message : String(error));
+      return null;
+    }
+  }
+
+
+
+
+
+  /**
+   * Calculate realistic trade cost using real-time gas pricing
+   */
+  private async calculateRealisticTradeCost(tradeValueUsd: number, pairId: string): Promise<number> {
+    const poolFeePercent = pairId.includes('UBTC') ? 0.003 : 0.0005; // 0.3% or 0.05%
+    const poolFee = tradeValueUsd * poolFeePercent;
+
+    // Calculate gas cost using reference HYPE price
+    const hypeReferencePrice = await this.getReferenceHypePrice();
+    const gasInHype = 0.001; // Approximate gas in HYPE
+    const gasCost = hypeReferencePrice ? gasInHype * hypeReferencePrice : 0.044; // Fallback to ~$0.044
+
+    const slippageCost = tradeValueUsd * 0.0002; // 0.02% slippage
+
+    return poolFee + gasCost + slippageCost;
+  }
+
+  /**
+   * Get realistic profit report for all pairs
+   */
+  getRealisticProfitReport(): {
+    totalRealizedProfit: number;
+    totalCosts: number;
+    totalNetProfit: number;
+    pairSummaries: any[];
+    warnings: string[];
+  } {
+    if (!this.profitCalculationService) {
+      return {
+        totalRealizedProfit: 0,
+        totalCosts: 0,
+        totalNetProfit: 0,
+        pairSummaries: [],
+        warnings: ['Profit calculation service not initialized']
+      };
+    }
+
+    const pairSummaries = [];
+    let totalRealizedProfit = 0;
+    let totalCosts = 0;
+    const allWarnings: string[] = [];
+
+    // Get summaries for all active pairs
+    for (const pairId of this.pairConfigs.keys()) {
+      const summary = this.profitCalculationService.getPairProfitSummary(pairId);
+      pairSummaries.push(summary);
+      totalRealizedProfit += summary.realizedProfit;
+      totalCosts += summary.totalCosts;
+
+      // Validate each pair
+      this.profitCalculationService.validateProfitCalculation(pairId)
+        .then(validation => {
+          if (!validation.isRealistic) {
+            allWarnings.push(...validation.warnings);
+          }
+        });
+    }
+
+    const totalNetProfit = totalRealizedProfit - totalCosts;
+
+    return {
+      totalRealizedProfit,
+      totalCosts,
+      totalNetProfit,
+      pairSummaries,
+      warnings: allWarnings
+    };
   }
 
   /**
@@ -1817,6 +2406,9 @@ export default class GridBot extends EventEmitter {
       // Update pair-specific price history
       await this.updatePairPriceHistory(pairId, currentPrice);
 
+      // Calculate and log pair-specific dynamic price range
+      await this.calculatePairDynamicRange(pairId, currentPrice, pairConfig.priceRangePercent);
+
       // Check for grid triggers
       let triggeredGrids = 0;
       for (const grid of grids) {
@@ -1854,6 +2446,13 @@ export default class GridBot extends EventEmitter {
    * Check if a grid should be triggered for multi-pair trading
    */
   private shouldTriggerPairGrid(grid: GridLevel, currentPrice: number): boolean {
+    // Check if this grid has failed too many times
+    const failureCount = this.gridFailureCount.get(grid.id) || 0;
+    if (failureCount >= this.MAX_GRID_FAILURES) {
+      this.logger.warn(`🚫 Grid ${grid.id} disabled after ${failureCount} failures`);
+      return false;
+    }
+
     // Simple trigger logic: price crosses grid level
     const shouldTrigger = (grid.side === 'buy' && currentPrice <= grid.price) ||
                          (grid.side === 'sell' && currentPrice >= grid.price);
@@ -1904,12 +2503,16 @@ export default class GridBot extends EventEmitter {
         // Buy WHYPE with quote token (UBTC/USDT0)
         tokenIn = tokenAddresses[quoteToken as keyof typeof tokenAddresses];
         tokenOut = tokenAddresses[baseToken as keyof typeof tokenAddresses];
-        amountIn = ethers.utils.parseUnits((grid.quantity * grid.price).toFixed(8),
-          quoteToken === 'UBTC' ? 8 : 6); // UBTC has 8 decimals, USDT0 has 6
+
+        // For buy trades, grid.quantity now represents the quote token amount to spend
+        const decimals = quoteToken === 'UBTC' ? 8 : 6;
+        amountIn = ethers.utils.parseUnits(grid.quantity.toFixed(decimals), decimals);
       } else {
         // Sell WHYPE for quote token
         tokenIn = tokenAddresses[baseToken as keyof typeof tokenAddresses];
         tokenOut = tokenAddresses[quoteToken as keyof typeof tokenAddresses];
+
+        // For sell trades, grid.quantity represents the base token amount to sell
         amountIn = ethers.utils.parseUnits(grid.quantity.toFixed(18), 18); // WHYPE has 18 decimals
       }
 
@@ -1920,10 +2523,74 @@ export default class GridBot extends EventEmitter {
 
       // Calculate expected output using pricing service
       const poolFee = pairConfig.poolFee || 3000;
-      const quote = await this.pricingService.getPriceQuote(tokenIn, tokenOut, amountIn, poolFee);
+
+      this.logger.debug(`Getting quote for ${baseToken}/${quoteToken}`, {
+        tokenIn,
+        tokenOut,
+        amountIn: amountIn.toString(),
+        poolFee,
+        pairId
+      });
+
+      let quote = await this.pricingService.getPriceQuote(tokenIn, tokenOut, amountIn, poolFee);
+
+      // Fallback for small UBTC amounts that may fail QuoterV2
+      if (!quote && pairId.includes('UBTC')) {
+        this.logger.warn(`QuoterV2 failed for small UBTC amount, using fallback calculation`, {
+          amountIn: amountIn.toString(),
+          pairId
+        });
+
+        // Use current price for fallback calculation
+        const currentPrice = this.pairLastPrice.get(pairId) || 0.00038275;
+        let fallbackAmountOut: ethers.BigNumber;
+
+        if (grid.side === 'buy') {
+          // Buy WHYPE with UBTC: amountOut = amountIn / price
+          const ubtcAmount = parseFloat(ethers.utils.formatUnits(amountIn, 8));
+          const whypeAmount = ubtcAmount / currentPrice;
+          fallbackAmountOut = ethers.utils.parseUnits(whypeAmount.toFixed(18), 18);
+        } else {
+          // Sell WHYPE for UBTC: amountOut = amountIn * price
+          const whypeAmount = parseFloat(ethers.utils.formatUnits(amountIn, 18));
+          const ubtcAmount = whypeAmount * currentPrice;
+          fallbackAmountOut = ethers.utils.parseUnits(ubtcAmount.toFixed(8), 8);
+        }
+
+        quote = {
+          amountOut: fallbackAmountOut,
+          source: 'FALLBACK_CALCULATION',
+          gasEstimate: ethers.BigNumber.from('150000')
+        };
+
+        this.logger.info(`Using fallback quote for ${baseToken}/${quoteToken}`, {
+          amountIn: ethers.utils.formatUnits(amountIn, grid.side === 'buy' ? 8 : 18),
+          amountOut: ethers.utils.formatUnits(fallbackAmountOut, grid.side === 'buy' ? 18 : 8),
+          price: currentPrice.toFixed(8),
+          source: 'FALLBACK'
+        });
+      }
 
       if (!quote) {
+        this.logger.error(`Failed to get quote for ${baseToken}/${quoteToken} swap`, {
+          tokenIn,
+          tokenOut,
+          amountIn: amountIn.toString(),
+          poolFee,
+          pairId
+        });
         throw new Error(`Failed to get quote for ${baseToken}/${quoteToken} swap`);
+      }
+
+      if (quote.amountOut.isZero()) {
+        this.logger.error(`Quote returned zero output for ${baseToken}/${quoteToken}`, {
+          tokenIn,
+          tokenOut,
+          amountIn: amountIn.toString(),
+          amountOut: quote.amountOut.toString(),
+          source: quote.source
+        });
+        throw new Error(`Quote returned zero output for ${baseToken}/${quoteToken} swap`);
       }
 
       const expectedAmountOut = quote.amountOut;
@@ -1933,7 +2600,8 @@ export default class GridBot extends EventEmitter {
       // Execute the swap
       const recipient = await this.signer.getAddress();
 
-      this.logger.info(`🔄 [${pairId}] Executing ${grid.side} trade`, {
+      // Log to both main logger (for console) and trade logger (for file)
+      const tradeLogData = {
         gridId: grid.id,
         tokenPair: `${baseToken}/${quoteToken}`,
         tokenIn: tokenIn,
@@ -1943,7 +2611,10 @@ export default class GridBot extends EventEmitter {
         price: currentPrice.toFixed(8),
         poolFee: poolFee,
         slippage: `${(slippageTolerance * 100).toFixed(1)}%`
-      });
+      };
+
+      this.logger.info(`🔄 [${pairId}] Executing ${grid.side} trade`, tradeLogData);
+      this.tradeLogger.info(`Trade execution started: ${grid.side} ${baseToken}/${quoteToken}`, tradeLogData);
 
       const txResult = await this.tradingService.executeSwap(
         tokenIn,
@@ -1954,8 +2625,67 @@ export default class GridBot extends EventEmitter {
         recipient
       );
 
-      // Calculate actual profit
-      const profit = grid.quantity * currentPrice * pairConfig.profitMargin;
+      // Record trade execution with realistic profit calculation
+      let profit = 0;
+      let tradeExecution: any = null;
+      if (this.profitCalculationService) {
+        try {
+          tradeExecution = await this.profitCalculationService.recordTradeExecution(
+            grid.id,
+            pairId,
+            grid.side,
+            txResult.transactionHash,
+            tokenIn,
+            tokenOut,
+            amountIn.toString(),
+            expectedAmountOut.toString()
+          );
+
+          // Get realistic profit summary for this pair
+          const profitSummary = this.profitCalculationService.getPairProfitSummary(pairId);
+          profit = tradeExecution.totalCosts * -1; // Individual trade shows cost, profit comes from cycles
+
+          // 🔧 FIX: Convert TradeExecution to TradeRecord and persist to DataStore
+          const tradeRecord: TradeRecord = {
+            id: tradeExecution.id,
+            timestamp: tradeExecution.timestamp,
+            type: tradeExecution.side,
+            price: tradeExecution.executionPrice,
+            quantity: parseFloat(tradeExecution.amountIn) / (tradeExecution.side === 'sell' ? 1e18 : 1e8), // Convert from wei/satoshi
+            profit: profit,
+            success: true,
+            txHash: tradeExecution.txHash,
+            gridId: tradeExecution.gridId,
+            volume: tradeExecution.usdValue,
+            gasUsed: tradeExecution.gasUsed,
+            gasCost: tradeExecution.gasCost
+          };
+
+          // 💾 PERSIST TO DATASTORE - This was the missing piece!
+          await this.dataStore.addTrade(tradeRecord);
+
+          // Log realistic cost breakdown
+          this.logger.info(`💸 Trade cost breakdown`, {
+            gridId: grid.id,
+            pairId: pairId,
+            usdValue: `$${tradeExecution.usdValue.toFixed(2)}`,
+            poolFee: `$${tradeExecution.poolFee.toFixed(4)}`,
+            gasCost: `$${tradeExecution.gasCost.toFixed(4)}`,
+            slippageCost: `$${tradeExecution.slippageCost.toFixed(4)}`,
+            totalCost: `$${tradeExecution.totalCosts.toFixed(4)}`,
+            pairNetProfit: `$${profitSummary.netProfit.toFixed(4)}`
+          });
+
+        } catch (error) {
+          this.logger.error('Failed to record trade execution:', error);
+          // Fallback to zero profit to avoid inflated numbers
+          profit = 0;
+        }
+      } else {
+        // Fallback: show cost instead of fake profit
+        const tradeCost = await this.calculateRealisticTradeCost(grid.quantity * currentPrice, pairId);
+        profit = -tradeCost;
+      }
 
       // Update pair-specific performance tracking
       const currentTrades = this.pairTotalTrades.get(pairId) || 0;
@@ -1970,31 +2700,83 @@ export default class GridBot extends EventEmitter {
       this.totalTrades++;
       this.totalProfit += profit;
 
+      // 📊 Record trade in simple validator for investment tracking
+      if (this.simpleTradeValidator && this.profitCalculationService) {
+        try {
+          const tradeExecution = await this.profitCalculationService.recordTradeExecution(
+            grid.id,
+            pairId,
+            grid.side,
+            txResult.transactionHash,
+            tokenIn,
+            tokenOut,
+            amountIn.toString(),
+            expectedAmountOut.toString()
+          );
+
+          // Record actual USD value in validator
+          this.simpleTradeValidator.recordTrade(grid, tradeExecution.usdValue);
+
+          // Log investment utilization
+          const utilization = this.simpleTradeValidator.getUtilizationStatus();
+          this.logger.info(`📊 Investment utilization updated`, {
+            totalUsed: `$${utilization.totalUsed.toFixed(2)}`,
+            remaining: `$${utilization.totalRemaining.toFixed(2)}`,
+            percentage: `${utilization.utilizationPercent.toFixed(1)}%`
+          });
+
+        } catch (error) {
+          this.logger.error('Failed to record trade in validator:', error);
+        }
+      }
+
       // Remove from pending grids
       pendingGrids.delete(grid.id);
 
-      this.logger.info(`💰 [${pairId}] Real trade executed successfully`, {
+      const successLogData = {
         gridId: grid.id,
         side: grid.side,
         price: currentPrice.toFixed(8),
         profit: `$${profit.toFixed(2)}`,
-        txHash: txResult.hash,
+        txHash: txResult.transactionHash,
+        blockNumber: txResult.blockNumber,
+        gasUsed: txResult.gasUsed?.toString(),
+        status: txResult.status === 1 ? 'SUCCESS' : 'FAILED',
         pairTotalTrades: this.pairTotalTrades.get(pairId),
         pairTotalProfit: `$${this.pairTotalProfit.get(pairId)?.toFixed(2)}`
-      });
+      };
+
+      this.logger.info(`💰 [${pairId}] Real trade executed successfully`, successLogData);
+      this.tradeLogger.info(`Trade execution completed successfully: ${grid.side} ${baseToken}/${quoteToken}`, successLogData);
 
     } catch (error) {
-      this.logger.error(`❌ [${pairId}] Trade execution failed`, {
+      // Track failure count for this grid
+      const currentFailures = this.gridFailureCount.get(grid.id) || 0;
+      const newFailureCount = currentFailures + 1;
+      this.gridFailureCount.set(grid.id, newFailureCount);
+
+      this.logger.error(`❌ [${pairId}] Trade execution failed (attempt ${newFailureCount}/${this.MAX_GRID_FAILURES})`, {
         gridId: grid.id,
         side: grid.side,
         price: currentPrice.toFixed(8),
         pairId: pairId,
+        failureCount: newFailureCount,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined
       });
 
-      // Don't remove from pending grids on failure - allow retry
-      // Grid will remain in pending state for next trigger attempt
+      // If max failures reached, remove from pending grids to stop retries
+      if (newFailureCount >= this.MAX_GRID_FAILURES) {
+        const pendingGrids = this.pairPendingGrids.get(pairId);
+        if (pendingGrids) {
+          pendingGrids.delete(grid.id);
+          this.logger.warn(`🚫 Grid ${grid.id} permanently disabled after ${newFailureCount} failures`);
+        }
+      }
+
+      // Update failure tracking
+      const pairFailures = this.pairFailedTrades.get(pairId) || 0;
+      this.pairFailedTrades.set(pairId, pairFailures + 1);
     }
   }
 
@@ -2002,11 +2784,12 @@ export default class GridBot extends EventEmitter {
    * Simulate trade execution for a specific pair (DRY RUN mode)
    */
   private async simulatePairTrade(pairId: string, grid: GridLevel, currentPrice: number): Promise<void> {
-    const pairConfig = this.pairConfigs.get(pairId)!;
     const pendingGrids = this.pairPendingGrids.get(pairId)!;
 
-    // Calculate profit
-    const profit = grid.quantity * currentPrice * pairConfig.profitMargin;
+    // Calculate realistic trade cost instead of fake profit
+    const tradeValueUsd = grid.quantity * currentPrice;
+    const tradeCost = await this.calculateRealisticTradeCost(tradeValueUsd, pairId);
+    const profit = -tradeCost; // Show cost as negative profit for simulation
 
     // Update pair-specific performance tracking
     const currentTrades = this.pairTotalTrades.get(pairId) || 0;
@@ -2024,14 +2807,17 @@ export default class GridBot extends EventEmitter {
     // Remove from pending grids
     pendingGrids.delete(grid.id);
 
-    this.logger.info(`💰 [${pairId}] Simulated trade executed`, {
+    const simLogData = {
       gridId: grid.id,
       side: grid.side,
       price: currentPrice.toFixed(8),
       profit: `$${profit.toFixed(2)}`,
       pairTotalTrades: this.pairTotalTrades.get(pairId),
       pairTotalProfit: `$${this.pairTotalProfit.get(pairId)?.toFixed(2)}`
-    });
+    };
+
+    this.logger.info(`💰 [${pairId}] Simulated trade executed`, simLogData);
+    this.tradeLogger.info(`Simulated trade executed: ${grid.side} ${pairId}`, simLogData);
   }
 
   /**

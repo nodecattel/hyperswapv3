@@ -253,6 +253,13 @@ class OnChainPriceService {
   }
 
   /**
+   * Get the ethers provider for use by other services
+   */
+  public getProvider(): ethers.providers.JsonRpcProvider {
+    return this.provider;
+  }
+
+  /**
    * Initialize contract instances
    */
   public async initializeContracts(): Promise<void> {
@@ -404,7 +411,7 @@ class OnChainPriceService {
 
       // Handle WHYPE/UBTC pair specifically
       if (baseToken === 'WHYPE' && quoteToken === 'UBTC') {
-        return await this.getWhypeUbtcPrice();
+        return await this.getWhypeUbtcPrice(forceFresh);
       }
 
       // Legacy support for HYPE/USDT0 (redirect to WHYPE/USDT0)
@@ -685,7 +692,7 @@ class OnChainPriceService {
   /**
    * Get WHYPE/UBTC price from the pool
    */
-  private async getWhypeUbtcPrice(): Promise<number | null> {
+  private async getWhypeUbtcPrice(forceFresh: boolean = false): Promise<number | null> {
     try {
       const whypeAddress = this.tokenAddresses['WHYPE']?.address || '0x5555555555555555555555555555555555555555';
       const ubtcAddress = this.tokenAddresses['UBTC']?.address || '0x9fdbda0a5e284c32744d2f17ee5c74b284993463';
@@ -693,8 +700,8 @@ class OnChainPriceService {
       // Use 1 WHYPE as standard amount
       const oneWhype = ethers.utils.parseUnits('1.0', 18);
 
-      // Try 0.3% fee pool (TVL 7.84M$, volume 2.8M$)
-      const quote = await this.getBestQuote(whypeAddress, ubtcAddress, oneWhype, 3000);
+      // Try 0.3% fee pool (TVL 7.84M$, volume 2.8M$) with forceFresh parameter
+      const quote = await this.getBestQuote(whypeAddress, ubtcAddress, oneWhype, 3000, forceFresh);
 
       if (!quote || quote.source.includes('MOCK')) {
         this.logger.warn('No valid WHYPE/UBTC quote available from on-chain sources');

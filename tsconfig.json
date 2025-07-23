@@ -54,7 +54,8 @@
     "data",
     "**/*.js",
     "**/*.test.js",
-    "coverage"
+    "coverage",
+    "src/dashboard/**/*"
   ],
   "ts-node": {
     "esm": false,
